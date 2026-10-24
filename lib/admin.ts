@@ -10,7 +10,11 @@
  *
  * Every route is loopback-only (same fence dsh-ssh uses): these endpoints
  * read and mutate the shared memory files, so a LAN-exposed web deployment
- * must not serve them.
+ * must not serve them. The one deliberate exception is the instance's own
+ * advertised public authority (a reverse tunnel), resolved per request from
+ * the same URL file `dsh-web-run.sh` uses, because a Cloudflare Quick Tunnel
+ * gets a new random hostname on every restart. The loopback peer requirement
+ * is never relaxed.
  *
  * Auto-protect (startAutoProtect): a background tick every minute that
  *   1. backs up all memory files into $DSH_HOME/memory-backup/latest/
@@ -47,12 +51,114 @@ function cfgNum(cfg: Record<string, unknown>, key: string, fallback: number): nu
 export const BACKUP_BASE = path.join(os.homedir(), '.dsh', 'memory-backup');
 export const BACKUP_LATEST = path.join(BACKUP_BASE, 'latest');
 
+/**
+ * Default file holding the currently advertised public URL of this DSH
+ * instance — the same file `dsh-web-run.sh` reads for `--trusted-host`.
+ * A Quick Tunnel rewrites it on every restart, which is exactly why the
+ * admin fence must re-read it rather than trust a pinned hostname.
+ */
+export const DEFAULT_ALLOWED_HOSTS_FILE = '/var/lib/cloudflared/dsh-url.txt';
+
 /** The four memory file basenames + project file prefix. */
 const MEMORY_FILES = ['MEMORY.md', 'USER.md', 'failures.md', 'STANDING.md'];
 const PROJECT_PREFIX = 'projects-';
 
-/** Loopback literal check plus browser same-origin markers (mirrors dsh-ssh). */
-function isLoopbackRequest(request: IncomingMessage): boolean {
+/**
+ * Loopback-guarded admin surface.
+ *
+ * Three layers are enforced:
+ *   1. the TCP peer must be a loopback address (a reverse tunnel such as
+ *      cloudflared connects FROM 127.0.0.1, so a tunnel still passes this);
+ *   2. the `Host` header must be a loopback literal by default;
+ *   3. the browser's same-origin markers must agree.
+ *
+ * Layer 2 is what blocks a browser that reaches the UI through a tunnel /
+ * reverse proxy: the `Host` header carries the public authority, not
+ * `127.0.0.1`, so every admin call returns `forbidden: loopback-only`.
+ * `adminAllowedHosts` therefore lets the operator declare extra authorities
+ * (e.g. the Cloudflare Quick Tunnel hostname). This is opt-in, never a
+ * blanket "allow any Host": LAYER 1 STILL APPLIES, so the request must still
+ * originate from this machine's loopback interface. It does not widen who can
+ * connect, only which authority the already-local connection may claim.
+ */
+/**
+ * Loopback-guarded admin surface.
+ *
+ * Three layers are enforced:
+ *   1. the TCP peer must be a loopback address (a reverse tunnel such as
+ *      cloudflared connects FROM 127.0.0.1, so a tunnel still passes this);
+ *   2. the `Host` header must be a loopback literal, or the authority of the
+ *      currently advertised public URL;
+ *   3. the browser's same-origin markers must agree.
+ *
+ * Layer 2 is what blocks a browser that reaches the UI through a tunnel /
+ * reverse proxy: the `Host` header carries the public authority, not
+ * `127.0.0.1`, so every admin call returned `forbidden: loopback-only`.
+ *
+ * Why the current tunnel authority is READ AT REQUEST TIME instead of being
+ * configured: Cloudflare Quick Tunnels get a NEW random hostname on every
+ * restart, so a pinned value would go stale on the next `systemctl restart
+ * cloudflared-dsh`. The same source `dsh-web-run.sh` already uses for
+ * `--trusted-host` is consulted (`adminAllowedHostsFile`, default
+ * `/var/lib/cloudflared/dsh-url.txt`), so both sides always agree on the
+ * current generation. LAYER 1 STILL APPLIES: this widens which authority an
+ * already-local connection may claim, never who may connect.
+ */
+function isLoopbackHostname(hostname: string): boolean {
+  return hostname === '127.0.0.1' || hostname === 'localhost' || hostname === '[::1]' || hostname === '::1';
+}
+
+/** Extract the lowercase `host[:port]` authority out of one URL string. */
+function authorityOf(urlText: string): string {
+  const trimmed = urlText.trim();
+  if (!trimmed) return '';
+  try {
+    return new URL(/^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`).host.toLowerCase();
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Resolve the authorities the admin API may accept beyond loopback literals.
+ *
+ * Sources, in order (all optional, all pinned to this machine's own files):
+ *   - `adminAllowedHosts`: static extras from the config (array or
+ *     comma/space separated string);
+ *   - `adminAllowedHostsFile`: a file holding the currently advertised public
+ *     URL (default: the Quick Tunnel URL file shared with `dsh-web-run.sh`).
+ *
+ * The file is re-read per request so a tunnel restart is picked up without a
+ * plugin reload; the read is cheap and failure-tolerant (a missing or
+ * unreadable file simply contributes nothing).
+ */
+export function resolveAllowedHosts(cfg: Record<string, unknown>): string[] {
+  const out = new Set<string>();
+
+  const raw = cfg.adminAllowedHosts;
+  const staticList = Array.isArray(raw)
+    ? raw.filter((h): h is string => typeof h === 'string')
+    : typeof raw === 'string'
+      ? raw.split(/[,\s]+/)
+      : [];
+  for (const entry of staticList) {
+    const auth = authorityOf(entry);
+    if (auth) out.add(auth);
+  }
+
+  const fileCfg = typeof cfg.adminAllowedHostsFile === 'string' ? cfg.adminAllowedHostsFile.trim() : '';
+  const filePath = fileCfg || DEFAULT_ALLOWED_HOSTS_FILE;
+  try {
+    const auth = authorityOf(fs.readFileSync(filePath, 'utf8'));
+    if (auth) out.add(auth);
+  } catch {
+    // absent/unreadable: no extra authority is granted
+  }
+
+  return [...out];
+}
+
+export function isLoopbackRequest(request: IncomingMessage, allowedHosts: readonly string[] = []): boolean {
   const address = request.socket.remoteAddress;
   if (address !== '127.0.0.1' && address !== '::1' && address !== '::ffff:127.0.0.1') return false;
   const host = request.headers.host;
@@ -63,7 +169,9 @@ function isLoopbackRequest(request: IncomingMessage): boolean {
   } catch {
     return false;
   }
-  if (hostUrl.hostname !== '127.0.0.1' && hostUrl.hostname !== 'localhost' && hostUrl.hostname !== '[::1]') return false;
+  // Layer 2: loopback literal, or the current public authority.
+  const hostAllowed = isLoopbackHostname(hostUrl.hostname) || allowedHosts.includes(hostUrl.host.toLowerCase());
+  if (!hostAllowed) return false;
   if (request.headers['sec-fetch-site'] === 'cross-site') return false;
   const origin = request.headers.origin;
   if (origin === undefined) return true;
@@ -210,6 +318,7 @@ export const CFG_SCHEMA: SchemaField[] = [
   { key: 'embeddingCacheDir', type: 'string', label: '模型缓存目录', group: '向量', help: '默认 $DSH_HOME/models' },
   { key: 'embeddingRemoteHost', type: 'string', label: '下载源镜像', group: '向量', help: '大陆可用 https://hf-mirror.com' },
   { key: 'adminProfile', type: 'string', label: '配置写回 profile', group: '管理', help: '默认 web' },
+  { key: 'adminAllowedHosts', type: 'string', label: '管理接口允许的额外主机', group: '管理', help: '隧道/反代时填公网域名，多个用逗号分隔；仍要求连接来自本机回环' },
   { key: 'autoBackupMin', type: 'number', label: '自动备份间隔（分钟）', group: '备份', help: '0=关闭；默认 60；只保留最新一份' },
   { key: 'autoSwitchOnPiLoss', type: 'bool', label: 'Pi 丢失自动切换', group: '备份', help: 'Pi 记忆消失时自动切到本地并恢复' },
 ];
@@ -225,7 +334,7 @@ export const CFG_DEFAULTS: Record<string, unknown> = {
   standingEnabled: true, standingCharLimit: 2000, standingMaxEntries: 20, failureInjectionEnabled: true,
   failureMaxAgeDays: 7, failureMaxEntries: 5, failureCharLimit: 10000, projectEnabled: true, projectCharLimit: 5000,
   memoryFtsEnabled: true, vectorEnabled: false, embeddingProvider: 'remote', embeddingModel: 'text-embedding-3-small',
-  embeddingRemoteHost: 'https://huggingface.co', adminProfile: 'web',
+  embeddingRemoteHost: 'https://huggingface.co', adminProfile: 'web', adminAllowedHosts: '',
   autoBackupMin: 60, autoSwitchOnPiLoss: true,
 };
 
@@ -400,9 +509,15 @@ type StandingChange = (list: string[]) => { next?: string[]; error?: string; mes
 export function makeAdminRoutes(deps: AdminRouteDeps): WebRoute[] {
   const { store, standing, cfg, vector, profilePatch, log } = deps;
 
-  /** Guard helper: fence + method check. */
+  /**
+   * Guard helper: fence + method check.
+   *
+   * The accepted authorities are resolved per request (not cached at startup)
+   * because a Cloudflare Quick Tunnel hostname changes on every restart; see
+   * `resolveAllowedHosts`. The loopback peer check is always applied.
+   */
   const guard = (req: IncomingMessage, res: ServerResponse, method: string): boolean => {
-    if (!isLoopbackRequest(req)) {
+    if (!isLoopbackRequest(req, resolveAllowedHosts(cfg))) {
       writeJson(res, 403, { error: 'forbidden: loopback-only' });
       return false;
     }

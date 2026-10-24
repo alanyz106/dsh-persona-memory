@@ -88,6 +88,21 @@ export interface PluginConfig {
   embeddingCacheDir: string;
   embeddingRemoteHost: string;
   adminProfile: string;
+  /**
+   * Extra authorities the admin API accepts besides loopback literals, for
+   * deployments reached through a tunnel or reverse proxy (the browser then
+   * sends the public hostname in `Host`, which the loopback fence rejects).
+   * The TCP peer must still be loopback — this only names the authority the
+   * already-local connection may claim. Match on `host[:port]`, lowercase.
+   */
+  adminAllowedHosts: string[];
+  /**
+   * File holding the currently advertised public URL (default: the Cloudflare
+   * Quick Tunnel URL file shared with `dsh-web-run.sh`). Re-read per request,
+   * so a tunnel restart — which changes the hostname — needs no config edit
+   * and no plugin reload. Set to `''` to rely on `adminAllowedHosts` alone.
+   */
+  adminAllowedHostsFile: string;
   autoBackupMin: number;
   autoSwitchOnPiLoss: boolean;
   /** Loose extras accepted from the patch/config (schema-driven admin page). */
@@ -164,6 +179,11 @@ export function apply(ctx: Context, config?: Record<string, unknown>): void {
     embeddingRemoteHost: 'https://huggingface.co', // mirror: https://hf-mirror.com
     // admin settings page: profile whose cordis.patch.yml receives config writes
     adminProfile: 'web',
+    // Extra Host authorities accepted by the admin API besides loopback
+    // (e.g. a Cloudflare Quick Tunnel hostname). Empty = strict loopback only.
+    adminAllowedHosts: [],
+    // Quick Tunnel URL file (same one dsh-web-run.sh reads for --trusted-host).
+    adminAllowedHostsFile: '/var/lib/cloudflared/dsh-url.txt',
     // auto-protect: periodic backup (minutes; 0=off) + Pi-loss fallback
     autoBackupMin: 60,
     autoSwitchOnPiLoss: true,
