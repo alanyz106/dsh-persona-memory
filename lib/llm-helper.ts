@@ -4,7 +4,7 @@
  */
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import type { Context } from '@deepseek-ai/cordis';
-import type { Session } from '@deepseek-ai/dsh-session';
+import type { Session, SessionEvent } from '@deepseek-ai/dsh-session';
 
 export interface LlmRoute {
   provider: string;
@@ -31,17 +31,17 @@ export function latestRoute(session: Session): LlmRoute | undefined {
  * `session.events`, 0.2.x as `session.snapshotEvents()`. Returns an empty log
  * for any other shape so callers degrade instead of throwing.
  */
-export function sessionEvents(session: Session): Session['events'] {
+export function sessionEvents(session: Session): readonly SessionEvent[] {
   const carrier = session as unknown as {
-    events?: Session['events'];
-    snapshotEvents?: () => Session['events'];
+    events?: readonly SessionEvent[];
+    snapshotEvents?: () => readonly SessionEvent[];
   };
   if (Array.isArray(carrier.events)) return carrier.events;
   if (typeof carrier.snapshotEvents === 'function') {
     const snapshot = carrier.snapshotEvents();
     if (Array.isArray(snapshot)) return snapshot;
   }
-  return [] as unknown as Session['events'];
+  return [];
 }
 
 /**

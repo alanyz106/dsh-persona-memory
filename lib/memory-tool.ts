@@ -4,7 +4,8 @@
  * pi-hermes-memory (entries separated by `§`, metadata in HTML comments).
  */
 import { HarnessError } from '@deepseek-ai/dsh-llm';
-import { defineTool, type JsonValue, type ToolRunContext } from '@deepseek-ai/dsh-tools';
+import { defineTool, type ToolRunContext } from '@deepseek-ai/dsh-tools';
+import type { JsonValue } from './json-value.js';
 import { maybeConsolidate, type ConsolidationConfig } from './consolidate.js';
 import { buildFailureText } from './failures.js';
 import { latestRoute, type LlmRoute } from './llm-helper.js';

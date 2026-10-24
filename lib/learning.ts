@@ -165,13 +165,23 @@ export function registerLifecycleHooks(ctx: Context, store: MemoryStore, cfg: Le
 function lastDirectUserText(session: Session): string {
   const events = sessionEvents(session);
   for (let i = events.length - 1; i >= 0; i--) {
-    const event = events[i];
+    const event = events[i] as
+      | {
+          type?: string;
+          data?: {
+            source?: { kind?: string };
+            content?: readonly { type: string; text?: string }[];
+          };
+        }
+      | undefined;
     if (event?.type === 'user/message' && event.data?.source?.kind === 'user') {
-      return event.data.content
-        ?.filter((b) => b.type === 'text')
-        .map((b) => b.text)
-        .join(' ')
-        .trim() ?? '';
+      return (
+        event.data.content
+          ?.filter((b) => b.type === 'text')
+          .map((b) => b.text ?? '')
+          .join(' ')
+          .trim() ?? ''
+      );
     }
   }
   return '';

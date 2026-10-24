@@ -11,7 +11,8 @@
  * All paths are bounded by `searchMaxResults` and return the same shape, so
  * injection cost is identical regardless of engine.
  */
-import { defineTool, type JsonValue } from '@deepseek-ai/dsh-tools';
+import { defineTool } from '@deepseek-ai/dsh-tools';
+import type { JsonValue } from './json-value.js';
 import { safeProjectName } from './projects.js';
 import type { MemoryKind, MemoryStore } from './memory-store.js';
 import type { FtsIndex } from './fts.js';
