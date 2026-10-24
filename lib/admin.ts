@@ -345,6 +345,7 @@ export function parseSectionConfig(content: string, id: string): Record<string, 
   const lines = content.split(/\r?\n/);
   let inSection = false;
   let inConfig = false;
+  let lastKey = '';
   const cfg: Record<string, unknown> = {};
   for (const line of lines) {
     const trimmed = line.trim();
@@ -353,10 +354,23 @@ export function parseSectionConfig(content: string, id: string): Record<string, 
       continue;
     }
     if (inConfig) {
+      const item = /^\s+-\s*(.*)$/.exec(line);
+      if (item && line.startsWith('      ') && lastKey) {
+        const cur = Array.isArray(cfg[lastKey]) ? (cfg[lastKey] as unknown[]) : [];
+        cur.push(item[1].trim().replace(/^['"]|['"]$/g, ''));
+        cfg[lastKey] = cur;
+        continue;
+      }
       const m = /^\s*([A-Za-z][A-Za-z0-9_]*):\s*(.*)$/.exec(line);
       if (m && line.startsWith('    ')) {
         const v = m[2].trim();
-        cfg[m[1]] = v === 'true' ? true : v === 'false' ? false : v.replace(/^['"]|['"]$/g, '');
+        lastKey = m[1];
+        const bare = v.replace(/^['"]|['"]$/g, '');
+        cfg[m[1]] = v === '[]' ? []
+          : !/^['"]/.test(v) && v === 'true' ? true
+            : !/^['"]/.test(v) && v === 'false' ? false
+              : !/^['"]/.test(v) && v !== '' && Number.isFinite(Number(v)) ? Number(v)
+                : bare;
         continue;
       }
       if (!line.startsWith('    ') && line.trim()) break;
@@ -379,19 +393,24 @@ export function updateSectionConfig(content: string, id: string, cfg: Record<str
     if (sectionIdx >= 0 && /^\s*config:\s*$/.test(lines[i]) && lines[i].startsWith('  ')) { configIdx = i; break; }
     if (sectionIdx >= 0 && i > sectionIdx && lines[i].trim() && !lines[i].startsWith(' ') && !/^-\s*id:/.test(t)) break;
   }
-  const line = (k: string): string => {
+  const scalar = (v: unknown): string => typeof v === 'boolean' ? (v ? 'true' : 'false')
+    : typeof v === 'number' ? String(v)
+      : `'${String(v).replace(/'/g, "''")}'`;
+  /** Render one key; arrays become block sequences so YAML keeps them arrays. */
+  const renderKey = (k: string): string[] => {
     const v = cfg[k];
-    const val = typeof v === 'boolean' ? (v ? 'true' : 'false')
-      : typeof v === 'number' ? String(v)
-        : `'${String(v).replace(/'/g, "''")}'`;
-    return '    ' + k + ': ' + val;
+    if (Array.isArray(v)) {
+      if (!v.length) return ['    ' + k + ': []'];
+      return ['    ' + k + ':', ...v.map((item) => '      - ' + scalar(item))];
+    }
+    return ['    ' + k + ': ' + scalar(v)];
   };
   if (sectionIdx < 0) {
-    const block = ['', `- id: ${id}`, '  config:', ...Object.keys(cfg).map(line)];
+    const block = ['', `- id: ${id}`, '  config:', ...Object.keys(cfg).flatMap(renderKey)];
     return content.replace(/\s*$/, '') + '\n' + block.join('\n') + '\n';
   }
   if (configIdx < 0) {
-    const block = ['  config:', ...Object.keys(cfg).map(line)];
+    const block = ['  config:', ...Object.keys(cfg).flatMap(renderKey)];
     lines.splice(sectionIdx + 1, 0, ...block);
     return lines.join('\n');
   }
@@ -402,18 +421,32 @@ export function updateSectionConfig(content: string, id: string, cfg: Record<str
     }
     return lines.length;
   })();
-  const existing = new Set<string>();
+  // Rebuild the config block: existing keys keep their order, changed values
+  // are re-rendered (an array may span lines), unknown keys are appended.
+  const seen = new Set<string>();
+  const body: string[] = [];
   for (let i = configIdx + 1; i < endIdx; i++) {
     const m = /^\s*([A-Za-z][A-Za-z0-9_]*):/.exec(lines[i]);
-    if (m) {
-      const k = m[1];
-      existing.add(k);
-      if (k in cfg) lines[i] = line(k);
+    if (!m) {
+      // sequence item ("      - ...") or noise: keep only if its parent was kept
+      if (/^\s*-\s/.test(lines[i])) continue;
+      body.push(lines[i]);
+      continue;
+    }
+    const k = m[1];
+    if (seen.has(k)) continue;
+    seen.add(k);
+    if (k in cfg) body.push(...renderKey(k));
+    else {
+      body.push(lines[i]);
+      // keep a following block sequence that belongs to this key
+      let j = i + 1;
+      while (j < endIdx && /^\s+-\s/.test(lines[j])) body.push(lines[j++]);
+      i = j - 1;
     }
   }
-  const insert: string[] = [];
-  for (const k of Object.keys(cfg)) if (!existing.has(k)) insert.push(line(k));
-  if (insert.length) lines.splice(endIdx, 0, ...insert);
+  for (const k of Object.keys(cfg)) if (!seen.has(k)) body.push(...renderKey(k));
+  lines.splice(configIdx + 1, endIdx - configIdx - 1, ...body);
   return lines.join('\n');
 }
 
@@ -666,15 +699,26 @@ export function makeAdminRoutes(deps: AdminRouteDeps): WebRoute[] {
     return { ok: true, message: outcome.message ?? `${project} 已更新（${next.length} 条）` };
   }
 
-  /** Current config echoed from the resolved cfg + defaults. */
+  /**
+   * Current config = schema defaults -> resolved plugin cfg -> display fixes.
+   * The resolved `cfg` layer is essential: without it the page shows defaults
+   * for every key, and a save would then write those defaults back over the
+   * user's real settings.
+   */
   function currentConfig(): Record<string, unknown> {
-    return Object.assign({}, CFG_DEFAULTS, {
+    const picked: Record<string, unknown> = {};
+    for (const f of CFG_SCHEMA) {
+      if (f.key in cfg) picked[f.key] = cfg[f.key];
+    }
+    return Object.assign({}, CFG_DEFAULTS, picked, {
       dir: cfg.dir ?? '',
-      vectorEnabled: cfg.vectorEnabled !== false,
-      embeddingProvider: cfg.embeddingProvider || 'local',
-      embeddingModel: cfg.embeddingModel || 'Xenova/bge-small-zh-v1.5',
+      vectorEnabled: cfg.vectorEnabled === true,
+      embeddingProvider: cfg.embeddingProvider || 'remote',
+      embeddingModel: cfg.embeddingModel || 'text-embedding-3-small',
       embeddingRemoteHost: cfg.embeddingRemoteHost || 'https://huggingface.co',
       embeddingCacheDir: cfg.embeddingCacheDir || '',
+      // adminAllowedHosts is a string[] in the plugin, a comma string in the UI.
+      adminAllowedHosts: Array.isArray(cfg.adminAllowedHosts) ? cfg.adminAllowedHosts.join(',') : (cfg.adminAllowedHosts ?? ''),
     });
   }
 
@@ -772,9 +816,18 @@ export function makeAdminRoutes(deps: AdminRouteDeps): WebRoute[] {
         for (const f of CFG_SCHEMA) {
           if (!(f.key in body)) continue;
           const raw = body[f.key];
-          if (f.type === 'bool') cfgOut[f.key] = !!raw;
-          else if (f.type === 'number') cfgOut[f.key] = raw === '' || raw === null || raw === undefined ? undefined : Number(raw);
+          if (f.type === 'bool') cfgOut[f.key] = raw === 'false' ? false : !!raw;
+          else if (f.type === 'number') {
+            const n = raw === '' || raw === null || raw === undefined ? NaN : Number(raw);
+            cfgOut[f.key] = Number.isFinite(n) ? n : undefined;
+          }
           else cfgOut[f.key] = raw === null || raw === undefined ? '' : String(raw);
+        }
+        // adminAllowedHosts: the plugin expects string[]; the page edits a
+        // comma-separated string. Write it back as a proper YAML list below.
+        if (typeof cfgOut.adminAllowedHosts === 'string') {
+          cfgOut.adminAllowedHosts = String(cfgOut.adminAllowedHosts)
+            .split(',').map((x) => x.trim()).filter(Boolean);
         }
         if (cfgOut.embeddingModel !== undefined && !String(cfgOut.embeddingModel).trim()) {
           writeJson(res, 400, { error: '模型名不能为空' }); return;
