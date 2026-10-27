@@ -16,3 +16,9 @@ client/client.js
 
 # vision toolkit runtime temp (pasted images etc.)
 .dsh-vision-toolkit/
+
+# 项目记忆（本地笔记，不进仓库 / 不进 npm 包）
+# AGENTS.md = 常驻规则 + @memory/*.md 索引；memory/ = 具体记忆内容。
+# 靠 ~/.dsh/memory-backup/{latest,history}/ 保护，见 memory/publish-todo.md
+/AGENTS.md
+/memory/
