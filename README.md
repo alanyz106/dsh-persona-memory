@@ -6,7 +6,7 @@
 
 让 agent 跨会话记住用户、项目与教训：事实写入磁盘永久保存，每次请求注入上下文；后台自动学习、纠正检测、失败记忆、容量合并让记忆"自己长出来且不失控"。
 
-**项目记忆（0.3.0 起）**：每个 Git 仓库在自己的根目录维护一份 `AGENTS.md`——常驻区（每次请求注入的硬约束）+ 末尾 `@memory/*.md` 索引行；真正的项目知识按主题分文件放在 `memory/` 下，模型按需读取。记忆跟着仓库走，可以随代码一起提交、评审、回滚。
+**项目记忆（0.0.1 起）**：每个 Git 仓库在自己的根目录维护一份 `AGENTS.md`——常驻区（每次请求注入的硬约束）+ 末尾 `@memory/*.md` 索引行；真正的项目知识按主题分文件放在 `memory/` 下，模型按需读取。记忆跟着仓库走，可以随代码一起提交、评审、回滚。
 
 ---
 
@@ -81,7 +81,7 @@
 |---|---|---|
 | `lib/memory-store.ts`（磁盘格式） | hermes `MemoryStore` | `\n§\n` 分隔符、`encodeEntry`/`decodeEntry` 正则（含 `project64` 字段）、`YYYY-MM-DD` 日期 |
 | `lib/failures.ts` | hermes `buildFailureMemoryText` | `[category] 内容 — Failed: … — Corrected to: …` 结构化文本 |
-| （已弃用）`lib/projects.ts` 的 Pi 项目根解析 | hermes `project.ts` / `paths.ts` | 0.3.0 起只保留其中「git 仓库根身份（worktree 共享）」的探测思路，`projects-memory/` 路径与迁移桥已删除 |
+| （已弃用）`lib/projects.ts` 的 Pi 项目根解析 | hermes `project.ts` / `paths.ts` | 0.0.1 起只保留其中「git 仓库根身份（worktree 共享）」的探测思路，`projects-memory/` 路径与迁移桥已删除 |
 
 ### 3. 概念级移植（思路照搬，代码全新）
 
@@ -312,7 +312,7 @@ file: 安装是真实副本——改代码后须重新构建、`dsh plugin --pro
 - **避免同时写**：两边都是原子写，但 Pi 有跨进程锁（`.pi-hermes-locks.sqlite` + recovery 文件），DSH 侧用**写前指纹预检**兜底——检测到外部改动就不覆盖并提示冲突。极端并发下仍可能互相感知不到，**不同时运行最安全**。
 - 覆盖的全局文件：`MEMORY.md` / `USER.md` / `STANDING.md` / `failures.md`。
 - 两边扫描标准一致（同一份 content-scanner 移植），hermes 写入的内容 DSH 直接可读，反之亦然；磁盘格式（含无尾随换行、project64、超限拒绝）已对齐 Pi v0.9.4 实测。
-- **项目记忆不再与 Pi 共用**：0.3.0 起改为仓库内的 `AGENTS.md` + `memory/`，Pi 的 `projects-memory/` 目录不再读取、也不再写入（旧目录原样留在磁盘，不自动迁移）。
+- **项目记忆不再与 Pi 共用**：0.0.1 起改为仓库内的 `AGENTS.md` + `memory/`，Pi 的 `projects-memory/` 目录不再读取、也不再写入（旧目录原样留在磁盘，不自动迁移）。
 
 ## 许可与致谢
 
