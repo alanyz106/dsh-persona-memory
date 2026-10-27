@@ -17,7 +17,7 @@
 4. **验证**：`npm run typecheck` + `node test/smoke.mjs`（226 项，exit=0）+ `node --check` dist 全部产物 + 模块级端到端测试（备份 / 恢复 / patch 写回用临时目录）。
 5. **重装**（⚠️ 必做，pnpm 有 store 缓存）：
    ```bash
-   dsh plugin --profile web remove dsh-persona-memory
+   dsh plugin --profile web remove @alanyz106/dsh-persona-memory
    dsh plugin --profile web add file:<本仓库路径>
    ```
    验证 `<profile>/node_modules/dsh-persona-memory/package.json` version 与仓库一致。

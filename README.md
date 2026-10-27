@@ -1,5 +1,7 @@
 # dsh-persona-memory
 
+> 本仓库是 [Quophic/dsh-persona-memory](https://github.com/Quophic/dsh-persona-memory) 的派生版本，npm 包名 `@alanyz106/dsh-persona-memory`（上游包名归其作者所有）。
+
 持久化长期人格记忆插件 for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）。
 
 让 agent 跨会话记住用户、项目与教训：事实写入磁盘永久保存，每次请求注入上下文；后台自动学习、纠正检测、失败记忆、容量合并让记忆"自己长出来且不失控"。
@@ -131,8 +133,8 @@
 npm run build
 
 # 安装（npm / CLI 版，web profile）
-dsh plugin --profile web add file:E:/GitHub/lian_dsh
-# 或：dsh plugin --profile web add dsh-persona-memory
+dsh plugin --profile web add @alanyz106/dsh-persona-memory
+# 或从本地副本：dsh plugin --profile web add file:<本仓库路径>
 
 # 安装（桌面版 0.2.x，desktop profile；用安装目录自带的 CLI）
 "D:/DeepSeek Harness/resources/runtime/cli/bin/dsh.cmd" plugin --profile desktop add file:E:/GitHub/lian_dsh
@@ -141,7 +143,7 @@ dsh plugin --profile web add file:E:/GitHub/lian_dsh
 dsh --profile web
 ```
 
-file: 安装是真实副本——改代码后须重新构建、`dsh plugin --profile web remove dsh-persona-memory` 再 add（pnpm 有 store 缓存，只 add 可能装旧副本），最后重启 web。
+file: 安装是真实副本——改代码后须重新构建、`dsh plugin --profile web remove @alanyz106/dsh-persona-memory` 再 add（pnpm 有 store 缓存，只 add 可能装旧副本），最后重启 web。
 
 如需覆盖配置（如 `dir`），在 profile 的 `cordis.patch.yml` 里按 id 覆盖即可（bundle 行在后层会被 profile 行覆盖）：
 

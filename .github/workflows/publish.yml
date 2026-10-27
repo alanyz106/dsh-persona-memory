@@ -8,7 +8,7 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    if: github.repository == 'Quophic/dsh-persona-memory'
+    if: github.repository == 'alanyz106/dsh-persona-memory'
     permissions:
       contents: write
       # npm Trusted Publishing: the publish step exchanges this OIDC token for
@@ -39,7 +39,7 @@ jobs:
         id: version
         run: |
           LOCAL=$(node -p "require('./package.json').version")
-          PUBLISHED=$(npm view dsh-persona-memory version 2>/dev/null || echo "0.0.0")
+          PUBLISHED=$(npm view @alanyz106/dsh-persona-memory version 2>/dev/null || echo "0.0.0")
           echo "local=$LOCAL" >> "$GITHUB_OUTPUT"
           echo "published=$PUBLISHED" >> "$GITHUB_OUTPUT"
           if [ "$LOCAL" != "$PUBLISHED" ]; then
@@ -56,6 +56,8 @@ jobs:
 
       - name: Publish to npm
         if: steps.version.outputs.changed == 'true'
+        # --access public is required for a scoped package to be installable
+        # without a paid plan.
         run: npm publish --provenance --access public
 
       - name: Tag release

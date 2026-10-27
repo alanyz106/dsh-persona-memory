@@ -33,4 +33,7 @@
 
 ## npm 发布
 
-用 Trusted Publishing（OIDC）：`publish.yml` 需要 `permissions: id-token: write`，npm 包设置里配 Trusted Publisher（Quophic / dsh-persona-memory / publish.yml）。不要再用 `NPM_TOKEN`（旧 token 失效时 `npm publish` 返回 `E404 PUT ... could not be found or you do not have permission`，看起来像包不存在，其实是认证失败）。
+- **包名是 `@alanyz106/dsh-persona-memory`**：上游 `dsh-persona-memory` 归 `quophic` 所有，本仓库（`alanyz106/dsh-persona-memory`，fork）不能也不该发到那个名字。
+- 用 Trusted Publishing（OIDC）：`publish.yml` 需要 `permissions: id-token: write`，并在 npm 包设置里配 Trusted Publisher（owner `alanyz106`、repo `dsh-persona-memory`、workflow `publish.yml`）。不要用 `NPM_TOKEN`（旧 token 失效时 `npm publish` 返回 `E404 PUT ... could not be found or you do not have permission`，看起来像包不存在，其实是认证失败）。
+- **改包名会连带 `cordis.patch.yml` 的 `name`**：bundle patch 按包名激活插件，不同步改就激活失败。
+- **版本号节奏**：只在大改动（可感知功能 / 修复）时递增；日常迭代靠 `remove` + `add` 刷新副本即可，不必每次动版本。

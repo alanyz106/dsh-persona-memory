@@ -4,4 +4,4 @@
 # A profile's own cordis.patch.yml can still override this row by id.
 - insert:
     - id: persona-memory
-      name: 'dsh-persona-memory'
+      name: '@alanyz106/dsh-persona-memory'
