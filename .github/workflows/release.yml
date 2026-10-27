@@ -10,9 +10,9 @@ name: release
 #
 #   dsh plugin --profile web add https://github.com/alanyz106/dsh-persona-memory/releases/latest/download/dsh-persona-memory.tgz
 #
-# Publishes on pushed vX.Y.Z tags; also runnable manually (workflow_dispatch
-# re-releases the current main even without a new tag, overwriting the
-# "latest" alias asset).
+# Publishes ONLY on pushed vX.Y.Z tags — plain pushes to main never release.
+# Manual workflow_dispatch stays available for rolling "latest" builds of main
+# (it overwrites the "latest" alias asset; versioned tag releases do not).
 
 on:
   push:
