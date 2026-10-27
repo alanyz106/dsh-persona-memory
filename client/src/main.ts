@@ -281,6 +281,8 @@ interface UiState {
   projOpen: string | null;
   /** per-project resident-block disclosure map */
   residentOpen: Record<string, boolean>;
+  /** per-config-group disclosure map inside the 插件配置 card; missing key = expanded */
+  configGroups: Record<string, boolean>;
 }
 
 function loadUiState(): UiState {
@@ -292,10 +294,11 @@ function loadUiState(): UiState {
         open: parsed.open && typeof parsed.open === 'object' ? Object.assign({}, DEFAULT_OPEN, parsed.open) : DEFAULT_OPEN,
         projOpen: typeof parsed.projOpen === 'string' ? parsed.projOpen : null,
         residentOpen: parsed.residentOpen && typeof parsed.residentOpen === 'object' ? parsed.residentOpen : {},
+        configGroups: parsed.configGroups && typeof parsed.configGroups === 'object' ? parsed.configGroups : {},
       };
     }
   } catch { /* private mode or corrupt value: fall through to defaults */ }
-  return { open: DEFAULT_OPEN, projOpen: null, residentOpen: {} };
+  return { open: DEFAULT_OPEN, projOpen: null, residentOpen: {}, configGroups: {} };
 }
 
 // ------------------------------------------------------------- page
@@ -323,6 +326,8 @@ function MemAdminPage(): React.ReactElement {
   const [open, setOpen] = React.useState<Record<string, boolean>>(initialUi.open);
   const [notice, setNotice] = React.useState<string | null>(null);
   const [cfgForm, setCfgForm] = React.useState<Record<string, unknown> | null>(null);
+  /** config-group disclosure inside 插件配置; missing key = expanded (schema-driven groups are mostly read top-down) */
+  const [cfgGroupsOpen, setCfgGroupsOpen] = React.useState<Record<string, boolean>>(initialUi.configGroups);
   const [modelStatus, setModelStatus] = React.useState<ModelStatusState | null>(null);
   const [confirmRestore, setConfirmRestore] = React.useState(false);
 
@@ -361,9 +366,9 @@ function MemAdminPage(): React.ReactElement {
   React.useEffect(() => {
     if (!mountedRef.current) { mountedRef.current = true; return; }
     try {
-      window.localStorage.setItem(UI_STATE_KEY, JSON.stringify({ open, projOpen, residentOpen } satisfies UiState));
+      window.localStorage.setItem(UI_STATE_KEY, JSON.stringify({ open, projOpen, residentOpen, configGroups: cfgGroupsOpen } satisfies UiState));
     } catch { /* storage full/blocked: persistence is best-effort */ }
-  }, [open, projOpen, residentOpen]);
+  }, [open, projOpen, residentOpen, cfgGroupsOpen]);
 
   // Debounced model-cache check while typing (400ms). In the browser
   // half the global setTimeout is available; keep a cleanup disposer so
@@ -852,18 +857,25 @@ function MemAdminPage(): React.ReactElement {
       if (!order.includes(f.group)) order.push(f.group);
     }
     for (const g of order) {
+      const gOpen = cfgGroupsOpen[g] !== false; // default expanded
       groups.push(React.createElement('div', { key: g },
         React.createElement('div', {
-          style: {
-            fontSize: 12,
-            fontWeight: 600,
-            color: 'var(--dsw-alias-label-secondary)',
-            textTransform: 'uppercase',
-            letterSpacing: '0.05em',
-            margin: '14px 0 8px',
-          },
-        }, g),
-        state.schema.filter((f) => f.group === g).map((f) => {
+          onClick: () => setCfgGroupsOpen(Object.assign({}, cfgGroupsOpen, { [g]: !gOpen })),
+          style: { display: 'flex', alignItems: 'center', gap: 8, margin: '14px 0 8px', cursor: 'pointer', userSelect: 'none' },
+        },
+          React.createElement('span', { style: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)', transition: 'transform 0.2s', transform: gOpen ? 'rotate(90deg)' : 'none' } }, '\u25B8'),
+          React.createElement('span', {
+            style: {
+              fontSize: 12,
+              fontWeight: 600,
+              color: 'var(--dsw-alias-label-secondary)',
+              textTransform: 'uppercase',
+              letterSpacing: '0.05em',
+            },
+          }, g),
+          React.createElement('span', { style: { flex: 1, borderBottom: '1px solid var(--dsw-alias-border-l1)' } }),
+        ),
+        gOpen ? state.schema.filter((f) => f.group === g).map((f) => {
           const key = f.key;
           const val = cfgForm[key];
           const setVal = (v: unknown) => setCfgForm(Object.assign({}, cfgForm, { [key]: v }));
@@ -929,7 +941,7 @@ function MemAdminPage(): React.ReactElement {
             f.type !== 'bool' ? React.createElement('div', { style: { marginTop: 6 } }, control) : null,
             f.help ? React.createElement('div', { style: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)', marginTop: 4 } }, f.help) : null,
           );
-        }),
+        }) : null,
       ));
     }
     return React.createElement('div', null,
