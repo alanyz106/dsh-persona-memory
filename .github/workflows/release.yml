@@ -1,0 +1,98 @@
+name: release
+
+# Build the plugin tarball and attach it to a GitHub Release.
+#
+# Why a tarball release: the plugin's build products (dist/ + client/client.js)
+# are gitignored, so a plain git clone cannot be installed by
+# `dsh plugin add`. A release tarball is the npm-package shape (verified:
+# `dsh plugin --profile <p> add <tgz>` installs and activates it), so target
+# machines can install straight from the release URL without a build chain:
+#
+#   dsh plugin --profile web add https://github.com/alanyz106/dsh-persona-memory/releases/latest/download/dsh-persona-memory.tgz
+#
+# Publishes on pushed vX.Y.Z tags; also runnable manually (workflow_dispatch
+# re-releases the current main even without a new tag, overwriting the
+# "latest" alias asset).
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      # Same flags as publish.yml: legacy-peer-deps because dsh-session
+      # 0.2.1-rc.x pins dsh-scope exactly against the ^0.1.0-rc.x peer chain
+      # (CI-only concern — the runtime resolves peers from the host dsh);
+      # ignore-scripts because sharp's native download is flaky here and the
+      # smoke tests never load it; no-package-lock because installs go through
+      # pnpm and the npm lockfile is deliberately untracked.
+      - name: Install
+        run: npm install --legacy-peer-deps --no-package-lock --ignore-scripts
+
+      - name: Build (TypeScript → dist + client bundle)
+        run: npm run build
+
+      - name: Run smoke tests
+        run: node test/smoke.mjs
+
+      - name: Pack tarball
+        # npm pack runs prepublishOnly (build again — cheap and proves the
+        # published tree self-builds) and emits alanyz106-dsh-persona-memory-<ver>.tgz.
+        # Normalize the name to dsh-persona-memory.tgz so the "latest/download/"
+        # alias URL stays stable across versions.
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          npm pack
+          mv alanyz106-dsh-persona-memory-${VERSION}.tgz dsh-persona-memory.tgz
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+        id: pack
+
+      - name: Check tag matches version (tag pushes only)
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          VERSION="${{ steps.pack.outputs.version }}"
+          if [ "v${VERSION}" != "${GITHUB_REF_NAME}" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match package.json version ${VERSION}"
+            exit 1
+          fi
+
+      - name: Delete previous latest release assets
+        # Keep the fixed-name asset replaceable: drop the old release's copy of
+        # dsh-persona-memory.tgz (workflow_dispatch re-runs) before uploading.
+        run: |
+          gh release delete latest --yes --cleanup-tag 2>/dev/null || true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create release with tarball
+        run: |
+          INSTALL_URL="https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/dsh-persona-memory.tgz"
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            gh release create "${GITHUB_REF_NAME}" dsh-persona-memory.tgz \
+              --title "${GITHUB_REF_NAME}" \
+              --generate-notes
+          else
+            gh release create latest dsh-persona-memory.tgz \
+              --title "latest (${{ steps.pack.outputs.version }})" \
+              --notes "Rolling build of main ($(git rev-parse --short HEAD)).
+
+          Install:
+
+              dsh plugin --profile <profile> add ${INSTALL_URL}"
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
