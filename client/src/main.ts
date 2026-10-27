@@ -692,10 +692,10 @@ function MemAdminPage(): React.ReactElement {
                 ),
                 React.createElement('div', { style: { fontSize: 11, color: 'var(--dsw-alias-label-secondary)', marginTop: 4, lineHeight: 1.5 } },
                   migratedAlready
-                    ? '已迁移：AGENTS.md 已有索引，迁移按钮已停用。若要继续精简常驻区，请用上方「编辑常驻区」手动搬进 memory/ 文件。'
+                    ? '已迁移，按钮已停用。继续精简常驻区请用上方「编辑常驻区」。'
                     : canMigrate
-                      ? '迁移：把纯散文的 AGENTS.md 拆成「常驻区 + @memory/ 索引」。会调用模型规划，校验不过不改动文件，原文另存 .bak。'
-                      : '该项目还没有 AGENTS.md，没有可迁移的内容。'),
+                      ? '把散文 AGENTS.md 拆成「常驻区 + 索引」，原文另存 .bak。'
+                      : '该项目还没有 AGENTS.md。'),
               ),
         ) : null,
       ));
@@ -710,18 +710,15 @@ function MemAdminPage(): React.ReactElement {
       });
     nodes.push(React.createElement('div', { key: 'register', style: { marginTop: 12, paddingTop: 10, borderTop: '1px solid var(--dsw-alias-border-l1)' } },
       React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
-        pathInput(newProjectPath, setNewProjectPath, '/绝对/仓库路径'),
+        pathInput(newProjectPath, setNewProjectPath, '仓库路径（子目录会自动归到仓库根）'),
         btn('登记项目', () => mutate('projectRegister', { root: newProjectPath }), { style: { padding: '3px 10px', fontSize: 12 } }),
       ),
       React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 8 } },
-        pathInput(scanPath, setScanPath, '扫描目录：/父目录（找它下面的所有 git 仓库）'),
+        pathInput(scanPath, setScanPath, '父目录（扫描其下所有 git 仓库，最多 4 层）'),
         btn('扫描目录', () => mutate('projectScan', { root: scanPath }), { style: { padding: '3px 10px', fontSize: 12 } }),
       ),
       React.createElement('div', { style: { fontSize: 11, color: 'var(--dsw-alias-label-secondary)', marginTop: 6, lineHeight: 1.5 } },
-        '项目记忆存在各仓库自己的 AGENTS.md / memory/ 里，没有统一目录可扫，所以插件靠一份注册表记住「见过哪些项目」。会话里写过记忆的会自动登记；这两个输入框用于补登记：'
-        + '「登记项目」填一个仓库路径（粘成子目录会自动归到仓库根），'
-        + '「扫描目录」填一个父目录，向下最多 4 层找出所有 git 仓库并批量登记（跳过 node_modules / dist / .git 等，worktree 归并到主仓库）。'
-        + '两者都只写注册表，不创建、不修改任何仓库文件；登记后点开项目即可用「迁移旧 AGENTS.md」处理它的散文文档。'),
+        '只登记路径，不改动仓库文件。会话里写过记忆的已自动登记。'),
     ));
     return nodes;
   };

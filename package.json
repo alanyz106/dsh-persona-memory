@@ -1,6 +1,6 @@
 {
   "name": "dsh-persona-memory",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "description": "Persistent long-term persona memory for DeepSeek Harness: MEMORY.md/USER.md global stores plus repository-local project memory (AGENTS.md index + memory/ topic files), memory / memory_search / project_memory tools, per-request context injection, secret scanning, and a WebUI memory-management settings page.",
   "type": "module",
   "main": "./dist/index.js",
