@@ -232,6 +232,17 @@ export async function migrateAgents(
   if (index.resident.length === 0 && !opts.force) {
     return { migrated: false, reason: 'AGENTS.md 已经是纯索引形态，无需迁移' };
   }
+  // Migration is a ONE-SHOT transformation of a prose document. A file that
+  // already carries index entries has been migrated: its remaining body text
+  // is the resident block the author wants kept, and the planner only ever
+  // sees that body. Re-running would replace the whole index with entries for
+  // those few resident rules and orphan every existing topic file.
+  if (index.entries.length > 0 && !opts.force) {
+    return {
+      migrated: false,
+      reason: `AGENTS.md 已有 ${index.entries.length} 条 @memory/ 索引，属于迁移后形态；常驻区如需继续拆分请手动编辑（迁移只处理纯散文文档）`,
+    };
+  }
   if (!route) return { migrated: false, reason: 'no-llm-route' };
 
   const original = index.resident.join('\n');
@@ -266,7 +277,15 @@ export async function migrateAgents(
     if (!result.ok) return { migrated: false, reason: result.error, plan };
     written.push(result.file);
   }
-  const entries = plan.files.map((f) => ({ file: f.file, summary: f.summary, exists: true, chars: f.content.length }));
+  // Normalize planned paths BEFORE comparing with existing entries: the model
+  // may answer `memory/x.md`, `x.md` or `./memory/x.md` for the same file.
+  const planned = plan.files
+    .map((f) => ({ file: safeMemoryRel(root, f.file) ?? f.file, summary: f.summary, exists: true, chars: f.content.length }));
+  // Belt and braces: keep any pre-existing entry the plan did not mention, so a
+  // re-run can never silently unindex a topic file that is still on disk.
+  const plannedFiles = new Set(planned.map((e) => e.file));
+  const survivors = readIndex(root).entries.filter((e) => !plannedFiles.has(e.file));
+  const entries = [...planned, ...survivors];
   const wrote = await writeAgents(root, plan.resident, entries, {
     residentCharLimit: opts.residentCharLimit,
     indexCharLimit: opts.indexCharLimit,

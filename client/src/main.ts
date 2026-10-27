@@ -143,10 +143,15 @@ function fmtBytes(n: number | undefined | null): string {
   return (n / 1048576).toFixed(1) + ' MB';
 }
 
-function btn(label: React.ReactNode, onClick: () => void, opts?: { disabled?: boolean; style?: React.CSSProperties }): React.ReactElement {
+function btn(
+  label: React.ReactNode,
+  onClick: () => void,
+  opts?: { disabled?: boolean; style?: React.CSSProperties; title?: string },
+): React.ReactElement {
   return React.createElement('button', {
     onClick,
     disabled: opts && opts.disabled,
+    title: opts && opts.title,
     style: Object.assign({
       padding: '5px 12px',
       borderRadius: 6,
@@ -545,6 +550,13 @@ function MemAdminPage(): React.ReactElement {
       const isOpen = projOpen === proj.name;
       const residentOver = proj.residentLimit > 0 && proj.residentChars > proj.residentLimit;
       const residentIsOpen = residentOpen[proj.name] === true;
+      /**
+       * Migration transforms a PROSE-only AGENTS.md into resident + index form.
+       * Once any index entry exists the file is already in the target shape, and
+       * there is nothing to migrate; with no AGENTS.md there is nothing to read.
+       */
+      const migratedAlready = proj.entries.length > 0;
+      const canMigrate = proj.exists && !migratedAlready;
       const residentEditing = projResidentEdit && projResidentEdit.project === proj.name;
       const creating = projCreate && projCreate.project === proj.name;
       const editingHere = projEdit && projEdit.project === proj.name;
@@ -655,22 +667,49 @@ function MemAdminPage(): React.ReactElement {
                   btn('取消', () => setProjCreate(null)),
                 ),
               )
-            : React.createElement('div', { style: { display: 'flex', gap: 8, marginTop: 10 } },
-                btn('+ 新建记忆文件', () => { setProjCreate({ project: proj.name, file: 'memory/', summary: '', content: '' }); setProjEdit(null); setProjResidentEdit(null); }, { style: { padding: '3px 10px', fontSize: 12 } }),
-                btn('迁移旧 AGENTS.md', () => mutate('projectMigrate', { project: proj.name, apply: true }), { style: { padding: '3px 10px', fontSize: 12 } }),
+            : React.createElement('div', { style: { marginTop: 10 } },
+                React.createElement('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
+                  btn('+ 新建记忆文件', () => { setProjCreate({ project: proj.name, file: 'memory/', summary: '', content: '' }); setProjEdit(null); setProjResidentEdit(null); }, { style: { padding: '3px 10px', fontSize: 12 } }),
+                  // Migration is a one-shot transformation of a prose document;
+                  // once index entries exist it is meaningless and unsafe.
+                  btn('迁移旧 AGENTS.md', () => mutate('projectMigrate', { project: proj.name, apply: true }), {
+                    disabled: !canMigrate,
+                    style: {
+                      padding: '3px 10px',
+                      fontSize: 12,
+                      opacity: canMigrate ? 1 : 0.4,
+                      cursor: canMigrate ? 'pointer' : 'not-allowed',
+                    },
+                    title: canMigrate
+                      ? '把纯散文的 AGENTS.md 拆成「常驻区 + @memory/ 索引」'
+                      : migratedAlready
+                        ? '该项目的 AGENTS.md 已经是「常驻区 + 索引」形态，无需迁移'
+                        : '该项目还没有 AGENTS.md，没有可迁移的内容',
+                  }),
+                ),
+                React.createElement('div', { style: { fontSize: 11, color: 'var(--dsw-alias-label-secondary)', marginTop: 4, lineHeight: 1.5 } },
+                  migratedAlready
+                    ? '已迁移：AGENTS.md 已有索引，迁移按钮已停用。若要继续精简常驻区，请用上方「编辑常驻区」手动搬进 memory/ 文件。'
+                    : canMigrate
+                      ? '迁移：把纯散文的 AGENTS.md 拆成「常驻区 + @memory/ 索引」。会调用模型规划，校验不过不改动文件，原文另存 .bak。'
+                      : '该项目还没有 AGENTS.md，没有可迁移的内容。'),
               ),
         ) : null,
       ));
     });
     // ---- manual registration
-    nodes.push(React.createElement('div', { key: 'register', style: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 10 } },
-      React.createElement('input', {
-        value: newProjectPath,
-        onChange: (e: React.ChangeEvent<HTMLInputElement>) => setNewProjectPath(e.target.value),
-        placeholder: '登记项目：/绝对/仓库路径',
-        style: { flex: 1, fontSize: 12, padding: '4px 6px', border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 4, background: 'var(--dsw-alias-bg-layer-1)', color: 'var(--dsw-alias-label-primary)' },
-      }),
-      btn('登记', () => mutate('projectRegister', { root: newProjectPath }), { style: { padding: '3px 10px', fontSize: 12 } }),
+    nodes.push(React.createElement('div', { key: 'register', style: { marginTop: 12, paddingTop: 10, borderTop: '1px solid var(--dsw-alias-border-l1)' } },
+      React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
+        React.createElement('input', {
+          value: newProjectPath,
+          onChange: (e: React.ChangeEvent<HTMLInputElement>) => setNewProjectPath(e.target.value),
+          placeholder: '/绝对/仓库路径',
+          style: { flex: 1, fontSize: 12, padding: '4px 6px', border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 4, background: 'var(--dsw-alias-bg-layer-1)', color: 'var(--dsw-alias-label-primary)' },
+        }),
+        btn('登记项目', () => mutate('projectRegister', { root: newProjectPath }), { style: { padding: '3px 10px', fontSize: 12 } }),
+      ),
+      React.createElement('div', { style: { fontSize: 11, color: 'var(--dsw-alias-label-secondary)', marginTop: 4, lineHeight: 1.5 } },
+        '登记一个仓库路径，让它出现在这个列表里。项目记忆存在各仓库自己的 AGENTS.md / memory/ 里，没有统一目录可扫，所以插件靠一份注册表记住「见过哪些项目」——会话里写过记忆的会自动登记；这里用于补登记没在会话里用过的仓库。只写注册表，不创建任何文件。'),
     ));
     return nodes;
   };

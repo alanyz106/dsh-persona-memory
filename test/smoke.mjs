@@ -790,6 +790,48 @@ const migPreview = await migrateAgents(migCtx, migRoot2, { provider: 'p', model:
 });
 check('preview mode does not write', migPreview.migrated === false && migPreview.reason === 'preview' && migPreview.plan !== undefined);
 
+// re-running a migration must never unindex existing topic files
+const migRoot4 = fs.mkdtempSync(path.join(testDir, 'mig4-'));
+fs.mkdirSync(path.join(migRoot4, 'memory'), { recursive: true });
+for (const n of ['a', 'b', 'c']) fs.writeFileSync(path.join(migRoot4, 'memory', n + '.md'), `# ${n}\n`);
+fs.writeFileSync(path.join(migRoot4, 'AGENTS.md'), [
+  '# 规则', '', '- 先构建', '',
+  '@memory/a.md — A', '@memory/b.md — B', '@memory/c.md — C', '',
+].join('\n'));
+const migAlready = await migrateAgents(migCtx, migRoot4, { provider: 'p', model: 'm' }, {
+  apply: true, scan: true, fileCharLimit: 20000, residentCharLimit: 3000, indexCharLimit: 4000,
+  plan: async () => JSON.stringify({ resident: ['- 先构建'], files: [{ file: 'memory/new.md', summary: '新', content: '# 规则\n' }] }),
+});
+check('migration refuses an already-migrated project', migAlready.migrated === false && /属于迁移后形态/.test(migAlready.reason || ''), migAlready.reason);
+check('refused re-run keeps every index entry', readIndex(migRoot4).entries.length === 3);
+check('refused re-run creates no orphans', readIndex(migRoot4).orphans.length === 0);
+// even with force, a plan may not silently unindex a surviving topic file
+const migForced = await migrateAgents(migCtx, migRoot4, { provider: 'p', model: 'm' }, {
+  apply: true, force: true, scan: true, fileCharLimit: 20000, residentCharLimit: 3000, indexCharLimit: 4000,
+  plan: async () => JSON.stringify({ resident: ['- 先构建'], files: [{ file: 'memory/new.md', summary: '新', content: '# 规则\n' }] }),
+});
+const forcedEntries = readIndex(migRoot4).entries.map((e) => e.file);
+check('forced migration still keeps unmentioned entries',
+  migForced.migrated === true && forcedEntries.includes('memory/a.md') && forcedEntries.includes('memory/new.md'),
+  JSON.stringify(forcedEntries));
+
+// the migrate entry point must agree with the UI's "can migrate" predicate:
+// prose-only AGENTS.md => allowed; indexed AGENTS.md => refused.
+const migRoot5 = fs.mkdtempSync(path.join(testDir, 'mig5-'));
+fs.writeFileSync(path.join(migRoot5, 'AGENTS.md'), '# 规则\n\n## 构建\nnpm run build\n');
+const proseAllowed = await migrateAgents(migCtx, migRoot5, { provider: 'p', model: 'm' }, {
+  apply: false,
+  plan: async () => JSON.stringify({ resident: ['# 规则', '- 构建：npm run build'], files: [] }),
+});
+check('prose AGENTS.md is migratable (preview succeeds)',
+  proseAllowed.reason === 'preview' && proseAllowed.plan !== undefined, proseAllowed.reason);
+fs.writeFileSync(path.join(migRoot5, 'AGENTS.md'), '@memory/a.md — A\n');
+const indexedRefused = await migrateAgents(migCtx, migRoot5, { provider: 'p', model: 'm' }, {
+  apply: false, plan: async () => JSON.stringify({ resident: [], files: [] }),
+});
+check('indexed AGENTS.md reports not-migratable',
+  indexedRefused.migrated === false && /无需迁移/.test(indexedRefused.reason || ''), indexedRefused.reason);
+
 // an already-migrated file is a no-op
 const migRoot3 = fs.mkdtempSync(path.join(testDir, 'mig3-'));
 fs.writeFileSync(path.join(migRoot3, 'AGENTS.md'), '@memory/a.md — 主题\n');
