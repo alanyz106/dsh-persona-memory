@@ -23,3 +23,4 @@
 @memory/webui.md — 记忆管理页：卡片结构、路由族、配置写回
 @memory/release-sop.md — 两阶段迭代与上线 SOP、git 工作流
 @memory/pitfalls.md — 已知坑：pnpm 缓存、client 重建、版本兼容、备份数据
+@memory/publish-todo.md — TODO：走通 npm 发布链路（现状、待办、不可裸 npm install）
