@@ -260,6 +260,9 @@ function MemAdminPage(): React.ReactElement {
   const [editing, setEditing] = React.useState<EditingState | null>(null);
   const [confirmDel, setConfirmDel] = React.useState<EditingState | null>(null);
   const [projOpen, setProjOpen] = React.useState<string | null>(null);
+  /** Resident block is collapsed by default: it is a reference panel, and
+   *  expanded it visually ran into the index list below it. */
+  const [residentOpen, setResidentOpen] = React.useState<Record<string, boolean>>({});
   const [projEdit, setProjEdit] = React.useState<ProjectFileEditState | null>(null);
   const [projResidentEdit, setProjResidentEdit] = React.useState<ProjectResidentEditState | null>(null);
   const [projCreate, setProjCreate] = React.useState<ProjectCreateState | null>(null);
@@ -541,6 +544,7 @@ function MemAdminPage(): React.ReactElement {
     projects.forEach((proj) => {
       const isOpen = projOpen === proj.name;
       const residentOver = proj.residentLimit > 0 && proj.residentChars > proj.residentLimit;
+      const residentIsOpen = residentOpen[proj.name] === true;
       const residentEditing = projResidentEdit && projResidentEdit.project === proj.name;
       const creating = projCreate && projCreate.project === proj.name;
       const editingHere = projEdit && projEdit.project === proj.name;
@@ -557,34 +561,45 @@ function MemAdminPage(): React.ReactElement {
             proj.exists ? proj.entries.length + ' 个索引' : '无 AGENTS.md'),
         ),
         isOpen ? React.createElement('div', { style: { padding: '0 0 10px 20px' } },
-          // ---- resident block
-          React.createElement('div', { style: { margin: '4px 0 10px' } },
-            React.createElement('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 12, fontWeight: 600, marginBottom: 4 } },
-              React.createElement('span', null, '常驻区（每次请求注入）'),
-              React.createElement('span', { style: { fontWeight: 400, color: residentOver ? 'var(--dsw-alias-state-warn-primary)' : 'var(--dsw-alias-label-secondary)' } },
+          // ---- resident block (own disclosure: expanded it used to read as
+          // part of the index list below, since both are plain text panels)
+          React.createElement('div', { style: { margin: '2px 0 8px', borderBottom: '1px solid var(--dsw-alias-border-l1)', paddingBottom: 6 } },
+            React.createElement('div', {
+              onClick: () => setResidentOpen({ ...residentOpen, [proj.name]: !residentIsOpen }),
+              style: { display: 'flex', alignItems: 'center', gap: 8, padding: '5px 0', cursor: 'pointer', userSelect: 'none' },
+            },
+              React.createElement('span', { style: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)', transition: 'transform 0.2s', transform: residentIsOpen ? 'rotate(90deg)' : 'none' } }, '\u25B8'),
+              React.createElement('span', { style: { fontSize: 12, fontWeight: 600 } }, '常驻区（每次请求注入）'),
+              React.createElement('span', { style: { flex: 1 } }),
+              React.createElement('span', { style: { fontSize: 12, color: residentOver ? 'var(--dsw-alias-state-warn-primary)' : 'var(--dsw-alias-label-secondary)' } },
                 proj.residentChars + ' / ' + proj.residentLimit + ' 字符'),
             ),
             residentOver ? meter(Math.min(100, Math.round((proj.residentChars / proj.residentLimit) * 100))) : null,
-            residentEditing
-              ? React.createElement('div', null,
-                  React.createElement(TextArea, { value: projResidentEdit.content, onChange: (v) => setProjResidentEdit({ project: proj.name, content: v }), placeholder: '每行一条常驻规则；细节请写进 memory/ 主题文件' }),
-                  React.createElement('div', { style: { display: 'flex', gap: 8, marginTop: 6 } },
-                    btn('保存', () => mutate('projectResident', { project: proj.name, content: projResidentEdit.content })),
-                    btn('取消', () => setProjResidentEdit(null)),
-                  ),
-                )
-              : React.createElement('div', null,
-                  proj.resident.length === 0
-                    ? React.createElement('div', { style: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)', padding: '4px 0' } }, '（无，索引即全部内容）')
-                    : React.createElement('div', { style: { fontSize: 12, lineHeight: 1.6, whiteSpace: 'pre-wrap', background: 'var(--dsw-alias-bg-layer-1)', borderRadius: 6, padding: '6px 8px', maxHeight: 180, overflow: 'auto' } }, proj.resident.join('\n')),
-                  React.createElement('div', { style: { marginTop: 4 } },
-                    btn('编辑常驻区', () => { setProjResidentEdit({ project: proj.name, content: proj.resident.join('\n') }); setProjEdit(null); setProjCreate(null); }, { style: { padding: '3px 8px', fontSize: 12 } }),
-                  ),
-                ),
+            residentIsOpen
+              ? (residentEditing
+                  ? React.createElement('div', { style: { marginTop: 4 } },
+                      React.createElement(TextArea, { value: projResidentEdit.content, onChange: (v) => setProjResidentEdit({ project: proj.name, content: v }), placeholder: '每行一条常驻规则；细节请写进 memory/ 主题文件' }),
+                      React.createElement('div', { style: { display: 'flex', gap: 8, marginTop: 6 } },
+                        btn('保存', () => mutate('projectResident', { project: proj.name, content: projResidentEdit.content })),
+                        btn('取消', () => setProjResidentEdit(null)),
+                      ),
+                    )
+                  : React.createElement('div', { style: { marginTop: 4 } },
+                      proj.resident.length === 0
+                        ? React.createElement('div', { style: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)', padding: '4px 0' } }, '（无，索引即全部内容）')
+                        : React.createElement('div', { style: { fontSize: 12, lineHeight: 1.6, whiteSpace: 'pre-wrap', background: 'var(--dsw-alias-bg-layer-1)', borderRadius: 6, padding: '6px 8px', maxHeight: 180, overflow: 'auto' } }, proj.resident.join('\n')),
+                      React.createElement('div', { style: { marginTop: 4 } },
+                        btn('编辑常驻区', () => { setProjResidentEdit({ project: proj.name, content: proj.resident.join('\n') }); setProjEdit(null); setProjCreate(null); }, { style: { padding: '3px 8px', fontSize: 12 } }),
+                      ),
+                    ))
+              : null,
           ),
           // ---- index
-          React.createElement('div', { style: { fontSize: 12, fontWeight: 600, margin: '8px 0 2px' } },
-            '记忆索引（' + proj.entries.length + ' 项 · ' + proj.indexChars + ' / ' + proj.indexLimit + ' 字符）'),
+          React.createElement('div', { style: { fontSize: 12, fontWeight: 600, margin: '2px 0 2px', display: 'flex', alignItems: 'center', gap: 8 } },
+            React.createElement('span', null, '记忆索引（' + proj.entries.length + ' 项）'),
+            React.createElement('span', { style: { flex: 1 } }),
+            React.createElement('span', { style: { fontWeight: 400, color: 'var(--dsw-alias-label-secondary)' } },
+              proj.indexChars + ' / ' + proj.indexLimit + ' 字符')),
           proj.entries.length === 0
             ? React.createElement('div', { style: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)', padding: '4px 0' } }, '（无索引条目）')
             : proj.entries.map((entry) => projectEntryRow(proj, entry)),
