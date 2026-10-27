@@ -262,6 +262,42 @@ function meter(pct: number): React.ReactElement {
   );
 }
 
+// ------------------------------------------------------- persisted ui state
+
+/**
+ * Collapse/expand state survives reloads: readers expect the page to open the
+ * way they left it (e.g. 项目记忆 expanded last time stays expanded next
+ * launch). All disclosure states share one localStorage entry so future shapes
+ * stay in one place; any parse failure / storage error falls back to defaults.
+ */
+const UI_STATE_KEY = 'persona-memory.ui';
+
+/** Defaults match the old hardcoded values (resident/常驻指令 style cards open, reference cards closed). */
+const DEFAULT_OPEN: Record<string, boolean> = { standing: true, files: true, indexes: true, projects: false, backups: true, config: false };
+
+interface UiState {
+  open: Record<string, boolean>;
+  /** project name whose card is expanded (accordion, null = none) */
+  projOpen: string | null;
+  /** per-project resident-block disclosure map */
+  residentOpen: Record<string, boolean>;
+}
+
+function loadUiState(): UiState {
+  try {
+    const raw = window.localStorage.getItem(UI_STATE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as Partial<UiState>;
+      return {
+        open: parsed.open && typeof parsed.open === 'object' ? Object.assign({}, DEFAULT_OPEN, parsed.open) : DEFAULT_OPEN,
+        projOpen: typeof parsed.projOpen === 'string' ? parsed.projOpen : null,
+        residentOpen: parsed.residentOpen && typeof parsed.residentOpen === 'object' ? parsed.residentOpen : {},
+      };
+    }
+  } catch { /* private mode or corrupt value: fall through to defaults */ }
+  return { open: DEFAULT_OPEN, projOpen: null, residentOpen: {} };
+}
+
 // ------------------------------------------------------------- page
 
 function MemAdminPage(): React.ReactElement {
@@ -270,10 +306,11 @@ function MemAdminPage(): React.ReactElement {
   const [busy, setBusy] = React.useState(false);
   const [editing, setEditing] = React.useState<EditingState | null>(null);
   const [confirmDel, setConfirmDel] = React.useState<EditingState | null>(null);
-  const [projOpen, setProjOpen] = React.useState<string | null>(null);
+  const [initialUi] = React.useState(loadUiState);
+  const [projOpen, setProjOpen] = React.useState<string | null>(initialUi.projOpen);
   /** Resident block is collapsed by default: it is a reference panel, and
    *  expanded it visually ran into the index list below it. */
-  const [residentOpen, setResidentOpen] = React.useState<Record<string, boolean>>({});
+  const [residentOpen, setResidentOpen] = React.useState<Record<string, boolean>>(initialUi.residentOpen);
   const [projEdit, setProjEdit] = React.useState<ProjectFileEditState | null>(null);
   const [projResidentEdit, setProjResidentEdit] = React.useState<ProjectResidentEditState | null>(null);
   const [projCreate, setProjCreate] = React.useState<ProjectCreateState | null>(null);
@@ -283,7 +320,7 @@ function MemAdminPage(): React.ReactElement {
   const [scanPath, setScanPath] = React.useState('');
   const [standingEdit, setStandingEdit] = React.useState<StandingEditState | null>(null);
   const [newStanding, setNewStanding] = React.useState('');
-  const [open, setOpen] = React.useState<Record<string, boolean>>({ standing: true, files: true, indexes: true, projects: false, backups: true, config: false });
+  const [open, setOpen] = React.useState<Record<string, boolean>>(initialUi.open);
   const [notice, setNotice] = React.useState<string | null>(null);
   const [cfgForm, setCfgForm] = React.useState<Record<string, unknown> | null>(null);
   const [modelStatus, setModelStatus] = React.useState<ModelStatusState | null>(null);
@@ -317,6 +354,16 @@ function MemAdminPage(): React.ReactElement {
     }
   }, []);
   React.useEffect(() => { load(); }, [load]);
+
+  // Persist disclosure state so the next visit reopens the cards the way the
+  // user left them. Skip the very first render (no change to write yet).
+  const mountedRef = React.useRef(false);
+  React.useEffect(() => {
+    if (!mountedRef.current) { mountedRef.current = true; return; }
+    try {
+      window.localStorage.setItem(UI_STATE_KEY, JSON.stringify({ open, projOpen, residentOpen } satisfies UiState));
+    } catch { /* storage full/blocked: persistence is best-effort */ }
+  }, [open, projOpen, residentOpen]);
 
   // Debounced model-cache check while typing (400ms). In the browser
   // half the global setTimeout is available; keep a cleanup disposer so
