@@ -22,3 +22,7 @@ client/client.js
 # 靠 ~/.dsh/memory-backup/{latest,history}/ 保护，见 memory/publish-todo.md
 /AGENTS.md
 /memory/
+
+# npm lockfile: the plugin installs through pnpm (dsh plugin add) — an
+# npm lock would freeze the peer-resolution CI wants to keep loose.
+package-lock.json

@@ -24,10 +24,20 @@ jobs:
           node-version: 24
 
       - name: Install
-        # npm 7+ auto-installs the non-optional @deepseek-ai/* peers, so the
-        # smoke tests can resolve them on CI (the dsh runtime resolves them
-        # from the host install instead; profiles set autoInstallPeers: false).
-        run: npm install
+        # devDeps carry every @deepseek-ai package the TYPECHECK needs
+        # (dsh-agent augments cordis Context with systemPrompt; dsh-tools needs
+        # its own peer chain present at runtime for the smoke test imports).
+        # --legacy-peer-deps: dsh-session 0.2.1-rc.x pins dsh-scope EXACTLY,
+        # which conflicts with the ^0.1.0-rc.x peers of the client-runtime
+        # peer chain — the plugin resolves all @deepseek-ai/* from the HOST
+        # dsh install at real runtime, so this pin conflict only ever affects
+        # the CI type/test environment.
+        # --no-package-lock: the repo installs through pnpm (dsh plugin add);
+        # a committed npm lock would freeze the resolution CI wants loose.
+        # --ignore-scripts: @xenova/transformers pulls in sharp, whose native
+        # libvips download is flaky on CI and irrelevant to the smoke tests
+        # (embedding is a dynamic import; vector search falls back to FTS5).
+        run: npm install --legacy-peer-deps --no-package-lock --ignore-scripts
 
       - name: Build (TypeScript → dist + client bundle)
         run: npm run build
