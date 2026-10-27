@@ -125,10 +125,16 @@ async function api(path: string, payload?: unknown, method?: string): Promise<an
   try {
     body = await res.json();
   } catch {
-    /* non-JSON error body */
+    /* non-empty non-JSON body is handled below */
   }
   if (!res.ok) {
     const message = body && body.error ? body.error : 'HTTP ' + res.status;
+    // 404 on an admin route almost always means the running host process is
+    // older than the installed package: the page is newer than the host. Say
+    // so, instead of showing a bare "HTTP 404" that reads like a broken URL.
+    if (res.status === 404) {
+      throw new Error(message + ' —— 该接口在运行中的宿主里不存在，通常是重装插件后没重启 dsh web（页面比宿主新）。重启 web 后重试。');
+    }
     throw new Error(message);
   }
   return body;
