@@ -763,7 +763,7 @@ const permissivePolicy = sessionCapturePolicy(
 check('capture policy can opt derived sessions back in', permissivePolicy.learning === true && permissivePolicy.corrections === true);
 
 // 24. admin backup/restore covers project memory (AGENTS.md + memory/**)
-import { backupAll, restoreFromLatest, makeAdminRoutes, BACKUP_LATEST } from '../dist/lib/admin.js';
+import { backupAll, restoreFromLatest, makeAdminRoutes, backupPaths, pruneSnapshots } from '../dist/lib/admin.js';
 const backupMemDir = fs.mkdtempSync(path.join(testDir, 'backupmem-'));
 const backupProjRoot = fs.mkdtempSync(path.join(testDir, 'backupproj-'));
 fs.writeFileSync(path.join(backupMemDir, 'MEMORY.md'), 'global entry <!-- created=2026-01-01, last=2026-01-01 -->\n');
@@ -772,7 +772,11 @@ fs.writeFileSync(path.join(backupProjRoot, 'AGENTS.md'), '- resident rule\n\n@me
 fs.mkdirSync(path.join(backupProjRoot, 'memory', 'sub'), { recursive: true });
 fs.writeFileSync(path.join(backupProjRoot, 'memory', 'a.md'), '# A\n');
 fs.writeFileSync(path.join(backupProjRoot, 'memory', 'sub', 'b.md'), '# B\n');
-const backupResult = await backupAll({ dir: backupMemDir });
+// Never touch the real ~/.dsh/memory-backup: an earlier version of this test
+// deposited ~60 throwaway project snapshots into the live backup directory.
+const backupCfg = { dir: backupMemDir, backupDir: path.join(testDir, 'backups') };
+const BACKUP_LATEST = backupPaths(backupCfg, { history: false }).latest;
+const backupResult = await backupAll(backupCfg);
 check('backupAll reports success', backupResult.ok === true, backupResult.message);
 const projName = path.basename(backupProjRoot);
 const projBackupDir = path.join(BACKUP_LATEST, 'projects', projName);
@@ -782,10 +786,38 @@ check('backup keeps the flat global file', fs.existsSync(path.join(BACKUP_LATEST
 // mutate then restore
 fs.writeFileSync(path.join(backupProjRoot, 'AGENTS.md'), 'clobbered\n');
 fs.writeFileSync(path.join(backupProjRoot, 'memory', 'a.md'), 'clobbered\n');
-const restored = await restoreFromLatest({ dir: backupMemDir });
+const restored = await restoreFromLatest(backupCfg);
 check('restoreFromLatest reports restored files', restored >= 2, String(restored));
 check('restore brings AGENTS.md back', fs.readFileSync(path.join(backupProjRoot, 'AGENTS.md'), 'utf8').includes('resident rule'));
 check('restore brings memory files back', fs.readFileSync(path.join(backupProjRoot, 'memory', 'a.md'), 'utf8') === '# A\n');
+
+// 24b. dated history snapshots (so an accidental delete is recoverable)
+{
+  const histMem = fs.mkdtempSync(path.join(testDir, 'histmem-'));
+  const histBase = path.join(testDir, 'histbackups');
+  const histCfg = { dir: histMem, backupDir: histBase };
+  fs.writeFileSync(path.join(histMem, 'MEMORY.md'), 'v1 entry <!-- created=2026-01-01, last=2026-01-01 -->\n');
+  const run = await backupAll(histCfg, { history: true });
+  check('backupAll writes a dated history snapshot', run.ok && fs.existsSync(path.join(histBase, 'history')), run.message);
+  const snaps = fs.readdirSync(path.join(histBase, 'history'));
+  check('history snapshot contains the memory file',
+    snaps.length === 1 && fs.existsSync(path.join(histBase, 'history', snaps[0], 'MEMORY.md')));
+  // the snapshot keeps the OLD content even after the live file changes
+  fs.writeFileSync(path.join(histMem, 'MEMORY.md'), 'v2 entry <!-- created=2026-01-01, last=2026-01-01 -->\n');
+  await backupAll(histCfg, { history: true });
+  const firstSnap = fs.readdirSync(path.join(histBase, 'history')).sort()[0];
+  const kept = fs.readFileSync(path.join(histBase, 'history', firstSnap, 'MEMORY.md'), 'utf8');
+  check('an older snapshot keeps the pre-change content', kept.includes('v1 entry'), kept.slice(0, 40));
+  // restore from an explicit snapshot
+  const restoredFromSnap = await restoreFromLatest(histCfg, histMem, path.join(histBase, 'history', firstSnap));
+  const after = fs.readFileSync(path.join(histMem, 'MEMORY.md'), 'utf8');
+  check('restoreFromLatest can restore an explicit snapshot', restoredFromSnap >= 1 && after.includes('v1 entry'));
+  // pruning
+  for (let i = 0; i < 5; i++) fs.mkdirSync(path.join(histBase, 'history', `2020-01-0${i + 1}T00-00-00`), { recursive: true });
+  const removed = pruneSnapshots(path.join(histBase, 'history'), 3);
+  check('pruneSnapshots keeps only the newest N', removed > 0 && fs.readdirSync(path.join(histBase, 'history')).length === 3,
+    `removed=${removed} left=${fs.readdirSync(path.join(histBase, 'history')).length}`);
+}
 
 // 25. admin project routes: registry gate + write/read/delete
 const routeCtx = {

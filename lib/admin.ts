@@ -75,7 +75,63 @@ function cfgNum(cfg: Record<string, unknown>, key: string, fallback: number): nu
 
 /** Backup root under the DSH home (never inside the Pi-shared dir). */
 export const BACKUP_BASE = path.join(os.homedir(), '.dsh', 'memory-backup');
+/** The live snapshot every write refreshes. */
 export const BACKUP_LATEST = path.join(BACKUP_BASE, 'latest');
+/** Dated snapshots, so an accidental delete is recoverable (see `pruneSnapshots`). */
+export const BACKUP_HISTORY = path.join(BACKUP_BASE, 'history');
+/** How many dated snapshots to keep. */
+export const BACKUP_KEEP = 14;
+
+/** Where one backup run writes: the live mirror plus an optional dated copy. */
+export interface BackupPaths {
+  latest: string;
+  history?: string;
+}
+
+/**
+ * Resolve the backup destination.
+ *
+ * `cfg.backupDir` exists so tests never touch the real `~/.dsh/memory-backup`
+ * (a smoke run used to deposit a hundred throwaway project snapshots there).
+ * `history: false` skips the dated copy (used by the periodic auto-backup).
+ */
+export function backupPaths(cfg: Record<string, unknown>, opts: { history?: boolean } = {}): BackupPaths {
+  const base = typeof cfg.backupDir === 'string' && cfg.backupDir.trim()
+    ? cfg.backupDir.trim()
+    : BACKUP_BASE;
+  const paths: BackupPaths = { latest: path.join(base, 'latest') };
+  if (opts.history !== false) {
+    const historyRoot = path.join(base, 'history');
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    // Two backups inside the same second must not overwrite each other, or the
+    // "history" promise silently degrades to the old overwrite behaviour.
+    let candidate = path.join(historyRoot, stamp);
+    let n = 1;
+    while (fs.existsSync(candidate)) candidate = path.join(historyRoot, `${stamp}-${n++}`);
+    paths.history = candidate;
+  }
+  return paths;
+}
+
+/** Keep only the newest `keep` dated snapshots. */
+export function pruneSnapshots(historyDir: string, keep = BACKUP_KEEP): number {
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(historyDir, { withFileTypes: true });
+  } catch {
+    return 0;
+  }
+  const dirs = entries
+    .filter((e) => e.isDirectory())
+    .map((e) => e.name)
+    .sort();  // ISO-ish stamps sort chronologically
+  let removed = 0;
+  for (const name of dirs.slice(0, Math.max(0, dirs.length - keep))) {
+    fs.rmSync(path.join(historyDir, name), { recursive: true, force: true });
+    removed++;
+  }
+  return removed;
+}
 
 /**
  * Default file holding the currently advertised public URL of this DSH
@@ -531,19 +587,31 @@ async function copyTree(src: string, dst: string, skipDots = true): Promise<numb
  * driven by the registry (`.trash` and dot-entries are skipped — trash is
  * intentionally excluded from backups).
  */
-export async function backupAll(cfg: Record<string, unknown>): Promise<{ ok: boolean; message: string }> {
+export async function backupAll(
+  cfg: Record<string, unknown>,
+  opts: { history?: boolean } = {},
+): Promise<{ ok: boolean; message: string }> {
   const dir = resolveMemoryDir(cfg);
+  const paths = backupPaths(cfg, opts);
   let count = 0;
-  for (const name of MEMORY_FILES) {
-    if (await copyIfExists(path.join(dir, name), path.join(BACKUP_LATEST, name))) count++;
+  const writeSnapshot = async (root: string): Promise<void> => {
+    for (const name of MEMORY_FILES) {
+      if (await copyIfExists(path.join(dir, name), path.join(root, name))) count++;
+    }
+    for (const project of listRegistered(dir)) {
+      if (!project.exists) continue;
+      const target = path.join(root, PROJECT_BACKUP_DIR, project.name);
+      if (await copyIfExists(path.join(project.root, 'AGENTS.md'), path.join(target, 'AGENTS.md'))) count++;
+      count += await copyTree(path.join(project.root, 'memory'), path.join(target, 'memory'));
+    }
+  };
+  await writeSnapshot(paths.latest);
+  if (paths.history) {
+    await writeSnapshot(paths.history);
+    pruneSnapshots(path.dirname(paths.history));
   }
-  for (const project of listRegistered(dir)) {
-    if (!project.exists) continue;
-    const target = path.join(BACKUP_LATEST, PROJECT_BACKUP_DIR, project.name);
-    if (await copyIfExists(path.join(project.root, 'AGENTS.md'), path.join(target, 'AGENTS.md'))) count++;
-    count += await copyTree(path.join(project.root, 'memory'), path.join(target, 'memory'));
-  }
-  return { ok: true, message: `备份完成（${count} 个文件）→ ${BACKUP_LATEST}` };
+  const note = paths.history ? `，历史快照 ${path.basename(paths.history)}` : '';
+  return { ok: true, message: `备份完成（${count} 个文件）→ ${paths.latest}${note}` };
 }
 
 /**
@@ -551,14 +619,19 @@ export async function backupAll(cfg: Record<string, unknown>): Promise<{ ok: boo
  * @param targetDir override destination (defaults to resolveMemoryDir(cfg))
  * @returns number of restored files
  */
-export async function restoreFromLatest(cfg: Record<string, unknown>, targetDir?: string): Promise<number> {
+export async function restoreFromLatest(
+  cfg: Record<string, unknown>,
+  targetDir?: string,
+  snapshot?: string,
+): Promise<number> {
   const dir = targetDir || resolveMemoryDir(cfg);
+  const from = snapshot ?? backupPaths(cfg, { history: false }).latest;
   let count = 0;
   for (const f of MEMORY_FILES) {
-    if (await copyIfExists(path.join(BACKUP_LATEST, f), path.join(dir, f))) count++;
+    if (await copyIfExists(path.join(from, f), path.join(dir, f))) count++;
   }
   for (const project of listRegistered(dir)) {
-    const source = path.join(BACKUP_LATEST, PROJECT_BACKUP_DIR, project.name);
+    const source = path.join(from, PROJECT_BACKUP_DIR, project.name);
     if (!fs.existsSync(source)) continue;
     if (await copyIfExists(path.join(source, 'AGENTS.md'), path.join(project.root, 'AGENTS.md'))) count++;
     count += await copyTree(path.join(source, 'memory'), path.join(project.root, 'memory'));
