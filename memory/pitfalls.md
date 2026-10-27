@@ -13,6 +13,12 @@
 - 管理页的写路由只接受注册表内的项目名，不接受浏览器传来的路径——别为了方便加"按路径操作"的口子。
 - `memory/.trash/` 是删除文件的回收站，备份会跳过它。
 
+## WebUI 缓存
+
+- 插件 client bundle 由宿主 `dsh-client-modules` 以 `cache-control: public, max-age=31536000, immutable` 提供，正常刷新（F5）可能仍命中旧字节。常见症状：**页面是旧界面（旧文案、`[object Object]`、`undefined 字符`），但 `status` 路由返回的是新数据结构**——即"新后端 + 旧 client"。
+- 处理：强制重新加载（Ctrl+Shift+R / 关掉标签页重开）。不是插件问题，别去重装或改代码。
+- 判断依据：`grep -c projectResident ~/.dsh/profiles/web/node_modules/dsh-persona-memory/client/client.js` 命中说明磁盘上是新版；再对 `status` 路由看返回字段名是否为新结构。
+
 ## 数据安全
 
 - 备份目录 `$DSH_HOME/memory-backup/latest/` 是**真实数据**，测试 / 清理时先确认，删了要立即 `backupAll` 重建。
