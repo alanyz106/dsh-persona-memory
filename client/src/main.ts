@@ -896,9 +896,13 @@ function MemAdminPage(): React.ReactElement {
                   style: {
                     padding: '3px 10px',
                     fontSize: 12,
-                    background: active ? 'var(--dsw-alias-brand-primary)' : 'var(--dsw-alias-bg-layer-2)',
+                    // Active state = "pressed" inversion: fill with label-primary
+                    // (the shell's monochrome accent), text in the opposite
+                    // surface color. The brand token equals label-primary here
+                    // anyway, and #fff text on it vanished in dark mode.
+                    background: active ? 'var(--dsw-alias-label-primary)' : 'var(--dsw-alias-bg-layer-2)',
                     borderColor: active ? 'transparent' : 'var(--dsw-alias-border-l2)',
-                    color: active ? '#fff' : 'var(--dsw-alias-label-primary)',
+                    color: active ? 'var(--dsw-alias-bg-layer-1)' : 'var(--dsw-alias-label-primary)',
                     fontWeight: active ? 600 : 400,
                   },
                 });
@@ -917,9 +921,10 @@ function MemAdminPage(): React.ReactElement {
                         style: {
                           padding: '3px 10px',
                           fontSize: 12,
-                          background: active ? 'var(--dsw-alias-brand-primary)' : 'var(--dsw-alias-bg-layer-2)',
+                          // Same pressed-inversion treatment as the select buttons.
+                          background: active ? 'var(--dsw-alias-label-primary)' : 'var(--dsw-alias-bg-layer-2)',
                           borderColor: active ? 'transparent' : 'var(--dsw-alias-border-l2)',
-                          color: active ? '#fff' : 'var(--dsw-alias-label-primary)',
+                          color: active ? 'var(--dsw-alias-bg-layer-1)' : 'var(--dsw-alias-label-primary)',
                           fontWeight: active ? 600 : 400,
                         },
                       });
@@ -949,7 +954,9 @@ function MemAdminPage(): React.ReactElement {
         '所有配置写回当前 profile 的 cordis.patch.yml（persona-memory 段），重启 web 后生效'),
       groups,
       React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 12 } },
-        btn('保存全部配置', saveConfig, { style: { background: 'var(--dsw-alias-brand-primary)', borderColor: 'transparent', color: '#fff' } }),
+        // Default button look (no brand override): --dsw-alias-brand-primary is
+        // undefined in the web shell, which rendered this CTA as a white blank.
+        btn('保存全部配置', saveConfig, { style: { fontWeight: 600 } }),
         React.createElement('span', { style: { fontSize: 12, color: 'var(--dsw-alias-state-warn-primary)' } }, '保存后需重启 web 生效'),
       ),
     );
