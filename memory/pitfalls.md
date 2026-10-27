@@ -6,6 +6,17 @@
 - 改 `client/src` 后必须 `npm run build:client` 重建 + 重装 + 重启 web 才生效（预构建产物按包分发）。
 - **bundle 无 `harness.handle`**：Client↔Host 走 `webServer` 路由 + fetch。
 
+## client bundle 的注册 id 必须等于包名
+
+- `window.__ModuleLoader__.load({ id })` 的 `id` 是宿主 `dsh-client-modules` 的 factory 表键；宿主按**包名**（Loader 扫描出的图行 id）去查。两者不一致时脚本会"执行成功但注册了别的名字"，激活阶段直接失败：
+  ```
+  <包名>: import failed: client-modules: could not load "<包名>": plugins/??.../client.js&rev=...: loaded without registering "<包名>" via __ModuleLoader__.load
+  ```
+  还会伴随 `already executed without registering ...`（`executedBundleUrls` 记住了这条 URL，重试也不再生效），最后 `web boot: 1 entry did not activate`。
+- **根因是写死字符串**：`scripts/build-client.mjs` 以前把 `id: 'dsh-persona-memory'` 硬编码，包名改成 `@alanyz106/dsh-persona-memory` 后没跟着改。现在脚本从 `package.json` 读 `name`，并校验 `cordis.patch.yml` 的 `name:` 一致——**改包名只需改这两处数据文件**（包名 + patch），不用动构建脚本。
+- 自查（不必开浏览器）：`grep -m1 -o 'id: "[^"]*"' <profile>/node_modules/@<scope>/dsh-persona-memory/client/client.js` 必须与 `package.json` 的 `name` 逐字相同。
+- 对照宿主自带插件，`id` 一律是完整包名（如 `id: "@deepseek-ai/dsh-client-ui-theme"`）；第三方 `@xmanrui/dsh-im` 也是 `id: "@xmanrui/dsh-im"`。**没有"去掉 scope"的先例**。
+
 ## 项目记忆
 
 - `AGENTS.md` 是宿主 `@deepseek-ai/dsh-agent-instructions` 注入的——**写坏它 = 模型立刻丢失那部分规则**。迁移前插件会先存 `AGENTS.md.bak-<时间戳>`，标题保全校验不过就整份放弃。
@@ -35,5 +46,5 @@
 
 - **包名是 `@alanyz106/dsh-persona-memory`**：上游 `dsh-persona-memory` 归 `quophic` 所有，本仓库（`alanyz106/dsh-persona-memory`，fork）不能也不该发到那个名字。
 - 用 Trusted Publishing（OIDC）：`publish.yml` 需要 `permissions: id-token: write`，并在 npm 包设置里配 Trusted Publisher（owner `alanyz106`、repo `dsh-persona-memory`、workflow `publish.yml`）。不要用 `NPM_TOKEN`（旧 token 失效时 `npm publish` 返回 `E404 PUT ... could not be found or you do not have permission`，看起来像包不存在，其实是认证失败）。
-- **改包名会连带 `cordis.patch.yml` 的 `name`**：bundle patch 按包名激活插件，不同步改就激活失败。
+- **改包名会连带三处**：`package.json` 的 `name`、`cordis.patch.yml` 里的 `name:`（bundle patch 按包名激活插件，不同步改就激活失败）、以及 client bundle 注册的 id（由 `scripts/build-client.mjs` 从 `package.json` 自动读取，不要再手写）。构建脚本会在两者不一致时直接报错，见上面「client bundle 的注册 id 必须等于包名」。
 - **版本号节奏**：只在大改动（可感知功能 / 修复）时递增；日常迭代靠 `remove` + `add` 刷新副本即可，不必每次动版本。

@@ -806,6 +806,41 @@ const routes = makeAdminRoutes({
 check('admin exposes the project route family', ['projectRead', 'projectWrite', 'projectCreate', 'projectDelete', 'projectResident', 'projectMigrate', 'projectRegister']
   .every((name) => routes.some((r) => r.path === `/api/persona-memory/${name}`)));
 
+// 25b. a refused migration reports its reason (not a bare HTTP error)
+{
+  const migAdminDir = fs.mkdtempSync(path.join(testDir, 'migadmin-'));
+  const migAdminRepo = fs.mkdtempSync(path.join(testDir, 'migadminrepo-'));
+  fs.mkdirSync(path.join(migAdminRepo, '.git'));
+  // already-migrated shape => migrateAgents refuses
+  fs.mkdirSync(path.join(migAdminRepo, 'memory'), { recursive: true });
+  fs.writeFileSync(path.join(migAdminRepo, 'memory', 'a.md'), '# A\n');
+  fs.writeFileSync(path.join(migAdminRepo, 'AGENTS.md'), '- rule\n\n@memory/a.md — A\n');
+  registerProject(migAdminDir, migAdminRepo);
+  const migRoutes = makeAdminRoutes({
+    store: createMemoryStore({ dir: migAdminDir, limits: BIG_LIMITS }),
+    standing: createStandingStore({ dir: migAdminDir, maxEntries: 20, maxChars: 2000 }),
+    vector: {},
+    cfg: { dir: migAdminDir, autoBackupMin: 0 },
+    ctx: { logger: { warn() {}, info() {} } },
+    getRoute: () => undefined,
+    profilePatch: path.join(testDir, 'p.yml'),
+    log: () => {},
+  });
+  const route = migRoutes.find((r) => r.path === '/api/persona-memory/projectMigrate');
+  const req = {
+    method: 'POST', url: '/',
+    headers: { host: '127.0.0.1:3080' }, socket: { remoteAddress: '127.0.0.1' },
+    [Symbol.asyncIterator]: async function* () {
+      yield Buffer.from(JSON.stringify({ project: path.basename(migAdminRepo), apply: true }));
+    },
+  };
+  const res = { statusCode: 0, body: '', setHeader() {}, writeHead(c) { this.statusCode = c; }, end(b) { this.body = String(b); } };
+  await route.handler(req, res);
+  const payload = JSON.parse(res.body || '{}');
+  check('refused migration answers 200, not 400', res.statusCode === 200, String(res.statusCode));
+  check('refused migration carries a readable reason', typeof payload.reason === 'string' && payload.reason.length > 0, payload.reason);
+}
+
 // 26. migrateAgents end-to-end (planner injected; validation gates enforced)
 import { migrateAgents } from '../dist/lib/project-migrate.js';
 const migRoot = fs.mkdtempSync(path.join(testDir, 'mig-'));

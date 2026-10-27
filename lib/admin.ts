@@ -1069,7 +1069,10 @@ export function makeAdminRoutes(deps: AdminRouteDeps): WebRoute[] {
           indexCharLimit: cfgNum(cfg, 'projectIndexCharLimit', 4000),
         });
         log(`admin: migrate ${root} -> ${result.migrated ? 'applied' : result.reason}`);
-        writeJson(res, result.migrated ? 200 : 400, result);
+        // Always 200: a refused migration is a normal, repeatable outcome whose
+        // reason the user needs to read. A 400 makes the page treat it as a
+        // failed request and hides the explanation.
+        writeJson(res, 200, result);
       } catch (e) {
         writeJson(res, 500, { error: e instanceof Error ? e.message : String(e) });
       }

@@ -344,6 +344,11 @@ function MemAdminPage(): React.ReactElement {
     try {
       const res = await api('/' + action, payload || {});
       if (res && res.error) setNotice('操作失败: ' + res.error);
+      // Mutations that report success:false carry a human-readable `reason`
+      // (e.g. the migration planner's output failing a gate) — show it as the
+      // outcome rather than a generic "完成".
+      else if (res && res.migrated === false && res.reason) setNotice('未迁移：' + res.reason);
+      else if (res && res.ok === false && res.reason) setNotice('未完成：' + res.reason);
       else setNotice((res && res.message) || '完成');
       setEditing(null);
       setConfirmDel(null);
@@ -375,7 +380,11 @@ function MemAdminPage(): React.ReactElement {
       else setNotice((res && res.message) || '配置已保存');
       await load();
     } catch (e) {
-      setError(String((e && (e as Error).message) || e));
+      // A rejected action (e.g. the migration planner's output failing a gate)
+      // is a normal outcome, not a page failure: surface it in the notice area
+      // so the cards stay visible and the user can read the reason and retry.
+      // Only a failed initial LOAD blanks the page (see `load`).
+      setNotice('操作失败: ' + String((e && (e as Error).message) || e));
     } finally {
       setBusy(false);
     }
@@ -909,10 +918,16 @@ function MemAdminPage(): React.ReactElement {
     notice ? React.createElement('div', {
       style: {
         fontSize: 13,
-        color: notice.indexOf('失败') >= 0 ? 'var(--dsw-alias-state-error-primary)' : 'var(--dsw-alias-state-success-primary)',
+        color: /失败|失败|错误/.test(notice) ? 'var(--dsw-alias-state-error-primary)' : 'var(--dsw-alias-state-success-primary)',
         margin: '0 0 8px',
+        // Rejection reasons can be long (they may quote a plan); keep the page
+        // readable instead of letting one message scroll the cards off screen.
+        maxHeight: 160,
+        overflow: 'auto',
+        whiteSpace: 'pre-wrap',
+        lineHeight: 1.5,
       },
-    }, notice) : null,
+    }, notice.length > 600 ? notice.slice(0, 600) + ' …（完整原因见浏览器控制台）' : notice) : null,
     React.createElement('div', { style: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)', marginBottom: 12 } },
       '目录: ' + (state.dir || '(未找到)') + '  [' + (state.which || '') + ']'),
 
