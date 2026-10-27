@@ -30,6 +30,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { parseEntries, decodeEntry, ENTRY_DELIMITER, isEnoent, type DecodedEntry, type MemoryKind, type MemoryStore } from './memory-store.js';
 import { parseInstructions, normalizeInstruction, type StandingStore } from './standing.js';
 import {
+  resolveProjectRoot,
   readIndex,
   readMemoryFile,
   writeMemoryFile,
@@ -40,7 +41,7 @@ import {
   indexChars,
   type ProjectIndex,
 } from './project-memory.js';
-import { listRegistered, rootForName, registerProject, type RegisteredProject } from './project-registry.js';
+import { listRegistered, rootForName, registerProject, scanAndRegister, type RegisteredProject } from './project-registry.js';
 import { migrateAgents } from './project-migrate.js';
 import { scanContent } from './secret-scanner.js';
 import type { LlmRoute } from './llm-helper.js';
@@ -1079,10 +1080,42 @@ export function makeAdminRoutes(deps: AdminRouteDeps): WebRoute[] {
       if (body === undefined) { writeJson(res, 400, { error: 'invalid JSON body' }); return; }
       const raw = String(body.root || '').trim();
       if (!raw || !path.isAbsolute(raw) || !fs.existsSync(raw)) { writeJson(res, 400, { error: '需要已存在的绝对路径' }); return; }
+      // Normalize like the tool does: a pasted subdirectory must land on the
+      // repository root, or the entry would point at a folder with no
+      // AGENTS.md (`exists: false`) and the page would look broken.
+      const normalized = resolveProjectRoot(raw);
+      if (!normalized) {
+        writeJson(res, 400, { error: '该路径不是项目（家目录 / 文件系统根目录），请填仓库路径' });
+        return;
+      }
       const memoryDir = cfgStr(cfg, 'dir', resolveMemoryDir(cfg));
-      const record = registerProject(memoryDir, raw);
+      const record = registerProject(memoryDir, normalized);
       log(`admin: registered project ${record.name} -> ${record.root}`);
-      writeJson(res, 200, { ok: true, message: `已登记 ${record.name}`, project: record });
+      const note = path.resolve(raw) !== normalized
+        ? `（已从 ${raw} 归一化到仓库根 ${normalized}）`
+        : '';
+      writeJson(res, 200, { ok: true, message: `已登记 ${record.name}${note}`, project: record });
+    } },
+    { kind: 'exact', path: '/api/persona-memory/projectScan', handler: async (req: IncomingMessage, res: ServerResponse) => {
+      if (!guard(req, res, 'POST')) return;
+      const body = await readJsonBody(req);
+      if (body === undefined) { writeJson(res, 400, { error: 'invalid JSON body' }); return; }
+      const raw = String(body.root || '').trim();
+      if (!raw || !path.isAbsolute(raw) || !fs.existsSync(raw)) { writeJson(res, 400, { error: '需要已存在的绝对路径' }); return; }
+      const memoryDir = cfgStr(cfg, 'dir', resolveMemoryDir(cfg));
+      const scan = scanAndRegister(memoryDir, raw, {
+        maxDepth: Number.isFinite(Number(body.maxDepth)) ? Number(body.maxDepth) : undefined,
+        maxRepos: Number.isFinite(Number(body.maxRepos)) ? Number(body.maxRepos) : undefined,
+      });
+      log(`admin: scanned ${raw} -> ${scan.roots.length} repos (${scan.added.length} new)`);
+      const parts = [`扫描到 ${scan.roots.length} 个仓库`, `新增 ${scan.added.length}`];
+      if (scan.existing.length) parts.push(`已存在 ${scan.existing.length}`);
+      if (scan.truncated) parts.push('已达上限，提前停止');
+      writeJson(res, 200, {
+        ok: true,
+        message: parts.join('，'),
+        ...scan,
+      });
     } },
     { kind: 'exact', path: '/api/persona-memory/backup', handler: async (req: IncomingMessage, res: ServerResponse) => {
       if (!guard(req, res, 'POST')) return;

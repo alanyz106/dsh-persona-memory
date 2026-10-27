@@ -38,6 +38,14 @@
 
 项目记忆散落在各仓库里，没有统一目录可扫，所以 `<memoryDir>/project-registry.json` 记住见过的项目根（name → root，含 lastSeen）。**管理页的每个写路由都只接受注册表内的项目名**，不接受浏览器传来的路径——否则 loopback 页面就成了任意文件读写入口。
 
+三条入表路径：
+
+1. **自动**：`project_memory` 工具每次调用都 `registerProject`；项目段注入发现 AGENTS.md 时也登记。
+2. **手动登记**：管理页填一个绝对路径。登记前先跑 `resolveProjectRoot()` 归一化——粘子目录会自动归到 git 仓库根（否则条目指向一个没有 AGENTS.md 的目录，页面显示 `exists: false`，看起来像坏了）；家目录 / 根目录直接拒绝。
+3. **扫描目录**：`scanAndRegister()` 从给定父目录向下最多 4 层找含 `.git` 的目录并批量登记。跳过 `node_modules`/`dist`/`build`/`.git`/dot 目录；worktree 通过 `commondir` 归并到主仓库，不会一个仓库多条；`maxRepos` 上限 200，防止误指 `/` 把 web 卡住。找到仓库即停止下钻（子模块与 `memory/` 不必再走）。
+
+登记只写注册表，不创建也不修改任何仓库文件。登记后点开项目，若它的 AGENTS.md 还是散文形态，迁移按钮即可用。
+
 ## 迁移
 
 已有 prose AGENTS.md 由辅助 LLM 规划拆分：常驻区只保留操作性硬约束（构建 / 测试命令、禁改清单、部署约束、必守规范），其余按主题拆进 `memory/*.md`。硬校验：**原文每个标题必须能在常驻区或某个主题文件里找到**，否则迁移失败且不动文件；原文另存 `AGENTS.md.bak-<时间戳>`。

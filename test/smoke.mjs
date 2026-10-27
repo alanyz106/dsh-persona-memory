@@ -344,6 +344,32 @@ registerProject(regDir, secondRoot);
 check('listRegistered flags missing memory', listRegistered(regDir).some((r) => r.root === path.resolve(secondRoot) && r.exists));
 check('unregisterProject drops the record', unregisterProject(regDir, secondRoot) && !readRegistry(regDir).some((r) => r.root === path.resolve(secondRoot)));
 
+// 12b-2. bulk directory scan
+import { scanAndRegister } from '../dist/lib/project-registry.js';
+const scanBase = fs.mkdtempSync(path.join(testDir, 'scanbase-'));
+const scanMem = fs.mkdtempSync(path.join(testDir, 'scanmem-'));
+for (const rel of ['one', 'nested/two']) {
+  const dir = path.join(scanBase, rel);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.mkdirSync(path.join(dir, '.git'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'AGENTS.md'), '@memory/a.md — A\n');
+}
+fs.mkdirSync(path.join(scanBase, 'one', 'node_modules', 'x', '.git'), { recursive: true });
+fs.mkdirSync(path.join(scanBase, '.hidden', '.git'), { recursive: true });
+const scan1 = scanAndRegister(scanMem, scanBase);
+check('scan finds repositories at several depths', scan1.roots.length === 2, JSON.stringify(scan1.roots));
+check('scan registers each repository', readRegistry(scanMem).length === 2);
+check('scan skips node_modules and dotted directories',
+  !scan1.roots.some((r) => r.includes('node_modules') || r.includes('.hidden')));
+const scan2 = scanAndRegister(scanMem, scanBase);
+check('re-scan reports existing instead of duplicating', scan2.added.length === 0 && scan2.existing.length === 2);
+check('scan of a missing directory is empty', scanAndRegister(scanMem, path.join(testDir, 'nope')).roots.length === 0);
+// maxDepth 0 = only the parent directory itself is examined (it is not a repo)
+check('scan with maxDepth 0 finds nothing', scanAndRegister(scanMem, scanBase, { maxDepth: 0 }).roots.length === 0);
+// maxDepth 1 reaches `one` but not `nested/two`
+const scanDeep = scanAndRegister(scanMem, scanBase, { maxDepth: 1 });
+check('scan honours maxDepth', scanDeep.roots.length === 1 && scanDeep.roots[0].endsWith('one'), JSON.stringify(scanDeep.roots));
+
 // 12c. migration planner validation
 import { parsePlan, validatePlan, headingsOf } from '../dist/lib/project-migrate.js';
 const original = '# 规则\n\n## 构建\nnpm run build\n\n## 部署\nsystemctl restart app\n';

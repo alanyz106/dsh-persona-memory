@@ -273,6 +273,8 @@ function MemAdminPage(): React.ReactElement {
   const [projCreate, setProjCreate] = React.useState<ProjectCreateState | null>(null);
   const [projConfirm, setProjConfirm] = React.useState<{ project: string; file: string } | null>(null);
   const [newProjectPath, setNewProjectPath] = React.useState('');
+  /** parent directory to scan for repositories */
+  const [scanPath, setScanPath] = React.useState('');
   const [standingEdit, setStandingEdit] = React.useState<StandingEditState | null>(null);
   const [newStanding, setNewStanding] = React.useState('');
   const [open, setOpen] = React.useState<Record<string, boolean>>({ standing: true, files: true, indexes: true, projects: false, backups: true, config: false });
@@ -344,6 +346,7 @@ function MemAdminPage(): React.ReactElement {
       setProjCreate(null);
       setProjConfirm(null);
       setNewProjectPath('');
+      setScanPath('');
       setStandingEdit(null);
       setNewStanding('');
       setConfirmRestore(false);
@@ -697,19 +700,28 @@ function MemAdminPage(): React.ReactElement {
         ) : null,
       ));
     });
-    // ---- manual registration
+    // ---- manual registration + bulk scan
+    const pathInput = (value: string, onChange: (v: string) => void, placeholder: string): React.ReactElement =>
+      React.createElement('input', {
+        value,
+        onChange: (e: React.ChangeEvent<HTMLInputElement>) => onChange(e.target.value),
+        placeholder,
+        style: { flex: 1, fontSize: 12, padding: '4px 6px', border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 4, background: 'var(--dsw-alias-bg-layer-1)', color: 'var(--dsw-alias-label-primary)' },
+      });
     nodes.push(React.createElement('div', { key: 'register', style: { marginTop: 12, paddingTop: 10, borderTop: '1px solid var(--dsw-alias-border-l1)' } },
       React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
-        React.createElement('input', {
-          value: newProjectPath,
-          onChange: (e: React.ChangeEvent<HTMLInputElement>) => setNewProjectPath(e.target.value),
-          placeholder: '/绝对/仓库路径',
-          style: { flex: 1, fontSize: 12, padding: '4px 6px', border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 4, background: 'var(--dsw-alias-bg-layer-1)', color: 'var(--dsw-alias-label-primary)' },
-        }),
+        pathInput(newProjectPath, setNewProjectPath, '/绝对/仓库路径'),
         btn('登记项目', () => mutate('projectRegister', { root: newProjectPath }), { style: { padding: '3px 10px', fontSize: 12 } }),
       ),
-      React.createElement('div', { style: { fontSize: 11, color: 'var(--dsw-alias-label-secondary)', marginTop: 4, lineHeight: 1.5 } },
-        '登记一个仓库路径，让它出现在这个列表里。项目记忆存在各仓库自己的 AGENTS.md / memory/ 里，没有统一目录可扫，所以插件靠一份注册表记住「见过哪些项目」——会话里写过记忆的会自动登记；这里用于补登记没在会话里用过的仓库。只写注册表，不创建任何文件。'),
+      React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 8 } },
+        pathInput(scanPath, setScanPath, '扫描目录：/父目录（找它下面的所有 git 仓库）'),
+        btn('扫描目录', () => mutate('projectScan', { root: scanPath }), { style: { padding: '3px 10px', fontSize: 12 } }),
+      ),
+      React.createElement('div', { style: { fontSize: 11, color: 'var(--dsw-alias-label-secondary)', marginTop: 6, lineHeight: 1.5 } },
+        '项目记忆存在各仓库自己的 AGENTS.md / memory/ 里，没有统一目录可扫，所以插件靠一份注册表记住「见过哪些项目」。会话里写过记忆的会自动登记；这两个输入框用于补登记：'
+        + '「登记项目」填一个仓库路径（粘成子目录会自动归到仓库根），'
+        + '「扫描目录」填一个父目录，向下最多 4 层找出所有 git 仓库并批量登记（跳过 node_modules / dist / .git 等，worktree 归并到主仓库）。'
+        + '两者都只写注册表，不创建、不修改任何仓库文件；登记后点开项目即可用「迁移旧 AGENTS.md」处理它的散文文档。'),
     ));
     return nodes;
   };

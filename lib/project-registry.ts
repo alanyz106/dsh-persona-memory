@@ -16,7 +16,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { AGENTS_FILE } from './project-memory.js';
+import { AGENTS_FILE, resolveProjectRoot } from './project-memory.js';
 
 export const REGISTRY_FILE = 'project-registry.json';
 const REGISTRY_VERSION = 1;
@@ -142,4 +142,89 @@ export function listRegistered(memoryDir: string): RegisteredProject[] {
  */
 export function rootForName(memoryDir: string, name: string): string | null {
   return readRegistry(memoryDir).find((r) => r.name === name)?.root ?? null;
+}
+
+/** Directory names never worth descending into while scanning for repositories. */
+const SCAN_SKIP = new Set([
+  'node_modules', '.git', 'dist', 'build', 'out', 'target', 'vendor',
+  '.venv', 'venv', '__pycache__', '.cache', '.pnpm-store', '.next', '.turbo',
+]);
+
+export interface ScanResult {
+  /** project roots discovered (already normalized to repository roots) */
+  roots: string[];
+  /** newly added registry records */
+  added: ProjectRecord[];
+  /** roots that were already registered */
+  existing: string[];
+  /** directories visited (bounded) */
+  visited: number;
+  /** whether the walk hit its limits */
+  truncated: boolean;
+}
+
+/**
+ * Find Git repositories under `parent` and register each one.
+ *
+ * The registry normally fills itself from sessions; this is the bulk path for
+ * "point me at ~/GitHub and pick up everything". A directory counts as a
+ * repository when it contains a `.git` entry (directory, or the pointer file
+ * of a linked worktree); worktrees resolve to their main repository root, so
+ * several worktrees of one repo collapse into a single record.
+ *
+ * Depth and count are bounded: a scan is a UI convenience, not a filesystem
+ * crawler, and pointing it at `/` must not hang the admin route.
+ *
+ * @param memoryDir registry location
+ * @param parent directory to scan
+ * @param opts.maxDepth directory levels below `parent` (default 4)
+ * @param opts.maxRepos stop after this many repositories (default 200)
+ */
+export function scanAndRegister(
+  memoryDir: string,
+  parent: string,
+  opts: { maxDepth?: number; maxRepos?: number } = {},
+): ScanResult {
+  const maxDepth = opts.maxDepth ?? 4;
+  const maxRepos = opts.maxRepos ?? 200;
+  const result: ScanResult = { roots: [], added: [], existing: [], visited: 0, truncated: false };
+  const root = path.resolve(parent);
+  if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) return result;
+
+  const seen = new Set<string>();
+  const walk = (dir: string, depth: number): void => {
+    if (result.roots.length >= maxRepos) {
+      result.truncated = true;
+      return;
+    }
+    if (depth > maxDepth) return;
+    result.visited++;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    // A repository root is where we stop descending: `memory/` and nested
+    // submodules would otherwise be walked for nothing.
+    const isRepo = entries.some((e) => e.name === '.git');
+    if (isRepo) {
+      const projectRoot = resolveProjectRoot(dir) ?? path.resolve(dir);
+      if (!seen.has(projectRoot)) {
+        seen.add(projectRoot);
+        result.roots.push(projectRoot);
+        const before = readRegistry(memoryDir).some((r) => r.root === projectRoot);
+        if (before) result.existing.push(projectRoot);
+        else result.added.push(registerProject(memoryDir, projectRoot));
+      }
+      return;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      if (entry.name.startsWith('.') || SCAN_SKIP.has(entry.name)) continue;
+      walk(path.join(dir, entry.name), depth + 1);
+    }
+  };
+  walk(root, 0);
+  return result;
 }
