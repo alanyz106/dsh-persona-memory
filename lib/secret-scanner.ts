@@ -51,10 +51,14 @@ const SECRET_PATTERNS: SecretRule[] = [
   { pattern: /\bGITHUB_TOKEN\b/, id: 'env_github_token', severity: 'medium' },
   { pattern: /\bAWS_SECRET_ACCESS_KEY\b/, id: 'env_aws_secret', severity: 'medium' },
   { pattern: /\bDATABASE_URL\b/, id: 'env_database_url', severity: 'medium' },
-  // Inline secret assignments (likely accidental paste)
-  { pattern: /\bpassword\s*[=:]\s*\S{6,}\b/i, id: 'password_assignment', severity: 'medium' },
-  { pattern: /\bsecret\s*[=:]\s*\S{6,}\b/i, id: 'secret_assignment', severity: 'medium' },
-  { pattern: /\btoken\s*[=:]\s*\S{10,}\b/i, id: 'token_assignment', severity: 'medium' },
+  // Inline secret assignments (likely accidental paste).
+  // The value must look like a value — an unquoted ASCII run. `\S{10,}` used to
+  // swallow Chinese prose after the colon (`permissions: id-token: write，npm 包
+  // 设置里配 ...`), so ordinary Chinese notes about tokens were rejected as
+  // leaked credentials.
+  { pattern: /\b(?:password|passwd|pwd)\s*[=:]\s*["']?[A-Za-z0-9._~+/=\-]{6,}/i, id: 'password_assignment', severity: 'medium' },
+  { pattern: /\bsecret\s*[=:]\s*["']?[A-Za-z0-9._~+/=\-]{6,}/i, id: 'secret_assignment', severity: 'medium' },
+  { pattern: /\b(?:token|api[_-]?key)\s*[=:]\s*["']?[A-Za-z0-9._~+/=\-]{10,}/i, id: 'token_assignment', severity: 'medium' },
 ];
 
 const INVISIBLE_CHARS = new Set([

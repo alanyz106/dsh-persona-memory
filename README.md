@@ -2,7 +2,9 @@
 
 持久化长期人格记忆插件 for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）。
 
-让 agent 跨会话记住用户、项目与教训：事实写入磁盘永久保存，每次请求注入上下文；后台自动学习、纠正检测、失败记忆、容量合并让记忆"自己长出来且不失控"；磁盘格式与 [pi-hermes-memory](https://github.com/chandra447/pi-hermes-memory) 字节兼容，DSH 与 Pi 可读写同一份记忆文件。
+让 agent 跨会话记住用户、项目与教训：事实写入磁盘永久保存，每次请求注入上下文；后台自动学习、纠正检测、失败记忆、容量合并让记忆"自己长出来且不失控"。
+
+**项目记忆（0.3.0 起）**：每个 Git 仓库在自己的根目录维护一份 `AGENTS.md`——常驻区（每次请求注入的硬约束）+ 末尾 `@memory/*.md` 索引行；真正的项目知识按主题分文件放在 `memory/` 下，模型按需读取。记忆跟着仓库走，可以随代码一起提交、评审、回滚。
 
 ---
 
@@ -14,19 +16,21 @@
 |---|---|
 | 跨会话持久记忆 | `MEMORY.md`（事实/偏好/约定/环境）+ `USER.md`（用户画像），写入即永久保存 |
 | 每请求上下文注入 | 每次请求自动把当前记忆注入系统提示词（`memory:profile` 段，按字符预算截断） |
-| 与 Pi 共用记忆 | 磁盘格式与 pi-hermes-memory 完全兼容，DSH 与 Pi 读写同一份文件（MEMORY/USER/STANDING/failures/projects） |
-| 项目级记忆 | 每个项目独立记忆（git 仓库根为身份，worktree 共享），按会话 cwd 自动注入（`memory:project` 段） |
+| 全局记忆 | `MEMORY.md` / `USER.md` / `failures.md` / `STANDING.md` 存在 `<dir>`（默认 `$DSH_HOME/memory`） |
+| 项目级记忆 | 项目根 `AGENTS.md`（常驻区 + `@memory/*.md` 索引）+ `memory/` 主题文件；git 仓库根为身份（worktree 共享），按会话 cwd 自动注入索引与加载约定（`memory:project` 段） |
+| 项目记忆随仓库走 | 记忆文件就在仓库里，可 commit / review / revert；删除的文件移入 `memory/.trash/` 可恢复 |
 | 记忆老化 | 条目携带 `created/last` 日期，合并时据此判断陈旧条目 |
 
 ### B. 读写与检索工具
 
 | 功能 | 说明 |
 |---|---|
-| `memory` 工具 | `read` / `add` / `update` / `delete` / `rewrite`；`which` 选 memory/user/failure；`project` 参数操作项目记忆 |
-| `memory_search`（混合检索） | 优先 **FTS5 + 语义向量（RRF 融合）**：FTS5 全文索引（`<dir>/.memory-index.sqlite`，mtime 自动重建）+ 向量索引（`vectorIndexDir` 下 `.memory-vec.sqlite`，只存 embedding、指纹增量同步、纯 JS 余弦）；向量未启用时走 FTS5，SQLite 不可用时回退子串扫描；结果始终 ≤`searchMaxResults` 条、只进工具输出，注入成本不随检索方式增加 |
+| `memory` 工具 | `read` / `add` / `update` / `delete` / `rewrite`；`which` 选 memory/user/failure（全局记忆） |
+| `project_memory` 工具 | `list` / `read` / `write` / `append` / `delete` / `search` / `add_resident` / `remove_resident` / `migrate`；作用域固定为当前会话的项目，无 project 参数（防任意路径写） |
+| `memory_search`（混合检索，全局记忆） | 优先 **FTS5 + 语义向量（RRF 融合）**：FTS5 全文索引（`<dir>/.memory-index.sqlite`，mtime 自动重建）+ 向量索引（`vectorIndexDir` 下 `.memory-vec.sqlite`，只存 embedding、指纹增量同步、纯 JS 余弦）；向量未启用时走 FTS5，SQLite 不可用时回退子串扫描；结果始终 ≤`searchMaxResults` 条、只进工具输出，注入成本不随检索方式增加 |
 | 用量提示 | 所有 `memory` 操作返回用量百分比；达 90%（`usageNudgeThreshold`）提醒用 `rewrite` 合并 |
 | `/standing` 命令 | 用户管理常驻指令（列出 / add / remove / clear） |
-| WebUI 记忆管理页 | 设置页「记忆管理」区块（`settings.section` slot）：常驻指令增删改、三记忆文件条目编辑/删除、项目记忆浏览/编辑、FTS5/向量索引状态与重建、向量搜索配置（开关/模型/下载源/缓存目录）、已下载模型扫描与缓存检测、**插件配置卡**（43 项 schema 驱动全量配置）、**本地备份卡**（立即备份/恢复、自动备份、Pi 丢失自动切换） |
+| WebUI 记忆管理页 | 设置页「记忆管理」区块（`settings.section` slot）：常驻指令增删改、三记忆文件条目编辑/删除、**项目记忆卡**（常驻区编辑 + `@` 索引行按文件编辑/删除 + 孤儿文件 + 新建 + 迁移 + 手动登记）、FTS5/向量索引状态与重建、向量搜索配置、已下载模型扫描与缓存检测、**插件配置卡**（schema 驱动全量配置）、**本地备份卡**（立即备份/恢复、自动备份；项目记忆按注册表快照） |
 
 ### C. 自动学习机制
 
@@ -51,9 +55,10 @@
 |---|---|
 | 原子写 + 单锁串行队列 | 临时文件 + rename，崩溃不留半截文件；add/update/remove 走单锁原子读-改-写（`mutate`），并发工具调用绝不互相覆盖；只读/纯写各自加锁 |
 | 跨进程写保护 | 写前 sha256 指纹预检（对照 Pi 的 ExternalMemoryWriteConflict）：外部（Pi/手动编辑）改过就不覆盖，重试一次后返回 `conflict` 提示 |
-| 与 Pi 字节兼容 | 对齐 pi-hermes-memory v0.9.4 实测：无尾随换行、charCount 含分隔符、USER 上限 5000、超限拒绝写入、failure 去重按 (text, project)、注入 `<memory-context>` 围栏 |
+| 字节格式稳定性 | 无尾随换行、charCount 含分隔符、USER 上限 5000、超限拒绝写入、注入 `<memory-context>` 围栏 |
+| 路径安全闸门 | 项目记忆的每个路径（工具参数、管理页 body、迁移产物）都过 `safeMemoryRel`：必须 `memory/**.md`、无 `..`、无绝对路径、无 dotfile、resolve 后仍在 `memory/` 内（含符号链接逃逸检查） |
 | 优雅降级 | FTS5 不可用回退子串搜索；SQLite 动态 import，插件绝不硬依赖 |
-| 111 项冒烟测试 | 用真实 hermes 文件副本验证格式兼容、解析、读写、扫描、合并、项目、纠正、FTS、向量索引、溢出拒绝、字节格式、并发、围栏全链路 |
+| 226 项冒烟测试 | 验证存储格式、解析、读写、扫描、合并、项目根探测、索引解析、路径安全、迁移校验、备份恢复、纠正、FTS、向量索引、溢出拒绝、并发全链路 |
 ---
 
 ## 借鉴来源（明确声明）
@@ -74,7 +79,7 @@
 |---|---|---|
 | `lib/memory-store.ts`（磁盘格式） | hermes `MemoryStore` | `\n§\n` 分隔符、`encodeEntry`/`decodeEntry` 正则（含 `project64` 字段）、`YYYY-MM-DD` 日期 |
 | `lib/failures.ts` | hermes `buildFailureMemoryText` | `[category] 内容 — Failed: … — Corrected to: …` 结构化文本 |
-| `lib/projects.ts` | hermes `project.ts` / `paths.ts` | 项目根解析（`~/.pi/agent/projects-memory`）、git 仓库根身份（worktree 共享）、迁移桥、cwd 检测 |
+| （已弃用）`lib/projects.ts` 的 Pi 项目根解析 | hermes `project.ts` / `paths.ts` | 0.3.0 起只保留其中「git 仓库根身份（worktree 共享）」的探测思路，`projects-memory/` 路径与迁移桥已删除 |
 
 ### 3. 概念级移植（思路照搬，代码全新）
 
@@ -94,6 +99,7 @@
 | `/standing` 命令 | `ctx.commands` 注册 |
 | `lib/llm-helper.ts` | 会话 `request/header` 路由解析 + `ctx.llm.stream` |
 | `lib/fts.ts` | `node:sqlite` FTS5（DSH `dsh-session-query-sqlite` 同款契约） |
+| `lib/project-memory.ts` / `project-registry.ts` / `project-migrate.ts` / `project-memory-tool.ts` | 全新设计：仓库内 `AGENTS.md` 索引 + `memory/` 主题文件、注册表、LLM 迁移闸门 |
 | 存储实现（原子写/队列/API） | 全新编写（hermes 的 MemoryStore 耦合 Pi API，无法直接复用） |
 
 > 刻意未移植：hermes 的 SQLite 会话搜索（DSH 原生 `dsh-session-query-sqlite` 已具备）、程序性技能（DSH 原生 skills 已具备）、子进程传输与 SQLite 锁协调器（DSH 插件进程内运行，不需要）。
@@ -104,8 +110,9 @@
 
 | 工具/命令 | 说明 |
 |---|---|
-| `memory` | `read` / `add` / `update` / `delete` / `rewrite`，`which` 选 `memory` / `user` / `failure`；`project` 参数操作项目记忆；failure 支持 `category` / `failure_reason` / `corrected_to` |
-| `memory_search` | `query` + 可选 `which`（`memory`/`user`/`failure`/`all`）+ 可选 `project` |
+| `memory` | 全局记忆：`read` / `add` / `update` / `delete` / `rewrite`，`which` 选 `memory` / `user` / `failure`；failure 支持 `category` / `failure_reason` / `corrected_to` |
+| `memory_search` | 全局记忆检索：`query` + 可选 `which`（`memory`/`user`/`failure`/`all`） |
+| `project_memory` | 项目记忆：`list` / `read` / `write` / `append` / `delete` / `search` / `add_resident` / `remove_resident` / `migrate`；作用域为当前项目 |
 | `/standing` | 列出常驻指令 |
 | `/standing add <文本>` | 钉住一条常驻指令 |
 | `/standing remove <n>` | 按 1 起编号移除 |
@@ -189,8 +196,11 @@ file: 安装是真实副本——改代码后须重新构建、`dsh plugin --pro
 | `failureMaxAgeDays` | `7` | 失败注入窗口（按 created 日期） |
 | `failureMaxEntries` | `5` | 失败注入最多条数 |
 | `failureCharLimit` | `10000` | failures.md 字符上限（hermes 默认 memory×2） |
-| `projectEnabled` | `true` | 是否启用项目级记忆 |
-| `projectCharLimit` | `5000` | 单项目记忆字符上限 |
+| `projectEnabled` | `true` | 是否启用项目级记忆（注册 `project_memory` 工具 + 注入项目段） |
+| `projectFileCharLimit` | `20000` | 单个 `memory/<主题>.md` 的字符上限 |
+| `projectResidentCharLimit` | `3000` | `AGENTS.md` 常驻区字符预算（每次请求都注入，只放操作性硬约束） |
+| `projectIndexCharLimit` | `4000` | `AGENTS.md` 索引区（`@memory/...` 行）字符预算 |
+| `projectAutoMigrate` | `true` | 首次写入遇到 prose `AGENTS.md` 时，是否允许辅助 LLM 自动拆成常驻 + 索引 |
 
 `dir` 默认解析顺序：① 显式 `config.dir` → ② `~/.pi/agent/pi-hermes-memory`（若已存在 `MEMORY.md`，即与 Pi 共用）→ ③ `$DSH_HOME/memory`（默认 `~/.dsh/memory`）。
 
@@ -239,11 +249,68 @@ file: 安装是真实副本——改代码后须重新构建、`dsh plugin --pro
 
 **来源约束**：只有 `/standing` 命令或用户直接编辑文件能写入——模型无写入口（后台学习、合并、纠正检测都不碰它）。
 
+## 项目记忆（AGENTS.md 索引 + memory/ 主题文件）
+
+项目记忆跟着仓库走，不再集中存放在插件目录下。
+
+### 布局
+
+```
+<git 仓库根>/
+├── AGENTS.md      ← 常驻区（原样注入）+ 末尾 @memory/*.md 索引行
+└── memory/        ← 一主题一文件，按需读取
+    ├── architecture.md
+    ├── deployment.md
+    └── .trash/    ← 删除的文件（可恢复）
+```
+
+- **项目根** = git 主仓库根（`findGitRepoRoot` 纯 fs 探测，linked worktree 通过 `commondir` 回溯到主仓库，所有 worktree 共享一份记忆）；非 git 目录退化为会话 cwd；家目录与文件系统根不算项目。
+- **AGENTS.md 由宿主 `@deepseek-ai/dsh-agent-instructions` 整份注入**，所以常驻区天然每次请求生效。插件只额外注入"索引是懒加载、需要时读"的约定，不重复注入条目本身。
+- linked worktree 例外：宿主的发现规则会把根定在 worktree（`.git` 是文件），而记忆在主仓库根——此时插件自行补上常驻区，保证规则不丢。
+
+### 格式
+
+索引行是唯一机器可读部分，**行级识别**：
+
+```markdown
+- 构建：先 npm run build，再 remove+add 重装（pnpm store 有缓存）
+
+@memory/architecture.md — 模块地图、注入顺序、自动能力
+@memory/pitfalls.md: 已知坑与排查路径
+```
+
+- 识别规则：`@memory/<path>.md`，可选 `—` / `–` / `--` / `:` 分隔的描述；允许 `-` / `*` / `+` 列表前缀。
+- 其余内容全部算常驻区，**原样保留**（插件从不改写你的措辞）。
+- 无常驻内容时文件只有 `@` 行，即规范形态。
+- 三个预算：常驻区 `projectResidentCharLimit`（3000）、索引区 `projectIndexCharLimit`（4000）、单文件 `projectFileCharLimit`（20000）。**超预算拒绝写入，绝不静默裁剪**——被悄悄丢掉的常驻规则正是这个文件要防的事故。
+
+### 工具：`project_memory`
+
+作用域固定为当前会话的项目（**没有 `project` 参数**——能任意指名项目就能任意写路径）。`list` / `read` / `write` / `append` / `delete` / `search` / `add_resident` / `remove_resident` / `migrate`。写入自动维护索引行：新建文件补一行，改描述更新该行，删除文件同时移除指针并把文件移进 `memory/.trash/`。
+
+### 迁移已有 AGENTS.md
+
+首次写入遇到散文式 `AGENTS.md` 时（`projectAutoMigrate: true`），用**会话自身的模型路由**规划拆分：
+
+1. 常驻区只留操作性硬约束（构建/测试命令、禁改清单、部署约束、必守规范），原文措辞不动；
+2. 其余按主题拆进 `memory/<topic>.md`；
+3. **校验闸门**：计划必须可解析、每个文件路径过 `safeMemoryRel`、内容过 scanner、不超预算，且**原文每个标题都必须能在常驻区或某个主题文件里找到**——任一不满足就整份放弃、文件不动；
+4. 通过后原文另存 `AGENTS.md.bak-<时间戳>`，再写主题文件与新的 `AGENTS.md`。
+
+### 管理页
+
+「记忆管理 → 项目记忆」：每个项目显示根路径 → 常驻区（预算条 + 可整段编辑）→ 索引行（`@memory/x.md — 描述` + 编辑/删除）→ 未索引的孤儿文件 → 新建 / 迁移 / 手动登记路径。「编辑」打开的是**索引指向文件的全文**；「删除」= 删索引行 + 文件移入 `memory/.trash/`。写路由只接受注册表内的项目名，不接受浏览器传来的路径。
+
+### 注册表
+
+记忆散落在各仓库，没有统一目录可扫，所以 `<dir>/project-registry.json` 记录见过的项目根（`name → root`）。管理页与备份都基于它；某个根消失时标记为 `missing` 而不删记录，恢复检出后自动重新可用。
+
 ## 与 Pi 共用的注意点
 
 - **避免同时写**：两边都是原子写，但 Pi 有跨进程锁（`.pi-hermes-locks.sqlite` + recovery 文件），DSH 侧用**写前指纹预检**兜底——检测到外部改动就不覆盖并提示冲突。极端并发下仍可能互相感知不到，**不同时运行最安全**。
-- 本插件覆盖 `MEMORY.md` / `USER.md` / `STANDING.md` / `failures.md` / `projects-memory/`（项目根与 Pi 一致）。
+- 覆盖的全局文件：`MEMORY.md` / `USER.md` / `STANDING.md` / `failures.md`。
 - 两边扫描标准一致（同一份 content-scanner 移植），hermes 写入的内容 DSH 直接可读，反之亦然；磁盘格式（含无尾随换行、project64、超限拒绝）已对齐 Pi v0.9.4 实测。
+- **项目记忆不再与 Pi 共用**：0.3.0 起改为仓库内的 `AGENTS.md` + `memory/`，Pi 的 `projects-memory/` 目录不再读取、也不再写入（旧目录原样留在磁盘，不自动迁移）。
 
 ## 许可与致谢
 

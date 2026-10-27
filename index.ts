@@ -26,11 +26,14 @@ import { renderRecentFailures } from './lib/failures.js';
 import { createMemoryStore, type MemoryStore } from './lib/memory-store.js';
 import { registerMemorySearchTool } from './lib/memory-search-tool.js';
 import { registerMemoryTool, type MemoryToolConfig } from './lib/memory-tool.js';
+import { registerProjectMemoryTool } from './lib/project-memory-tool.js';
+import { type LlmRoute } from './lib/llm-helper.js';
+import { readIndex, resolveProjectRoot, type ProjectIndex } from './lib/project-memory.js';
+import { registerProject } from './lib/project-registry.js';
 import { makeAdminRoutes, profilePatchPath, startAutoProtect } from './lib/admin.js';
 import { renderMemoryBlock } from './lib/prompt.js';
 import { createFtsIndex } from './lib/fts.js';
 import { createVectorIndex } from './lib/vector-index.js';
-import { detectProject, resolveProjectsRoot } from './lib/projects.js';
 import { allowsInjection, sessionOf } from './lib/sessions.js';
 import { registerStandingCommand } from './lib/standing-command.js';
 import { createStandingStore, type StandingStore } from './lib/standing.js';
@@ -77,7 +80,10 @@ export interface PluginConfig {
   failureMaxEntries: number;
   failureCharLimit: number;
   projectEnabled: boolean;
-  projectCharLimit: number;
+  projectFileCharLimit: number;
+  projectResidentCharLimit: number;
+  projectIndexCharLimit: number;
+  projectAutoMigrate: boolean;
   memoryFtsEnabled: boolean;
   vectorEnabled: boolean;
   vectorIndexDir: string;
@@ -114,6 +120,108 @@ function resolveDir(cfg: { dir?: string } | undefined): string {
   // Share memory with Pi's pi-hermes-memory when that store already exists.
   if (fs.existsSync(path.join(PI_HERMES_DIR, 'MEMORY.md'))) return PI_HERMES_DIR;
   return dshHomePath('memory');
+}
+
+/**
+ * The session's effective working directory.
+ *
+ * The working-directory service is authoritative (a session can change
+ * directory mid-flight); the immutable session header is the fallback for
+ * contexts where the service is unavailable (e.g. tests).
+ */
+function cwdFromSession(ctx: Context, session: unknown): string | null {
+  const carrier = session as { header?: { cwd?: string } } | undefined;
+  try {
+    const service = ctx.get('workingDirectory') as { get?: (s: unknown) => string } | undefined;
+    const fromService = service?.get?.(session);
+    if (typeof fromService === 'string' && fromService) return fromService;
+  } catch {
+    /* service unavailable — fall through to the header */
+  }
+  return carrier?.header?.cwd ?? null;
+}
+
+/**
+ * Per-request index cache keyed by AGENTS.md mtime+size.
+ *
+ * The system-prompt variable provider is synchronous and runs on every
+ * request, so re-parsing AGENTS.md unconditionally would put a synchronous
+ * read on the hot path. A changed mtime or size invalidates the entry; the
+ * file is small, so a stale-by-one-write window is the only risk and the next
+ * request reparses.
+ */
+const indexCache = new Map<string, { key: string; index: ProjectIndex }>();
+
+/** @returns the parsed index for `root`, reusing it while AGENTS.md is unchanged */
+function readIndexCached(root: string): ProjectIndex {
+  const file = path.join(root, 'AGENTS.md');
+  let key = 'missing';
+  try {
+    const stat = fs.statSync(file);
+    key = `${stat.mtimeMs}:${stat.size}`;
+  } catch {
+    key = 'missing';
+  }
+  const cached = indexCache.get(root);
+  if (cached && cached.key === key) return cached.index;
+  const index = readIndex(root);
+  indexCache.set(root, { key, index });
+  return index;
+}
+
+/**
+ * The project block injected into every request.
+ *
+ * The pointer lines themselves are NOT repeated here: `agent-instructions`
+ * already injects AGENTS.md verbatim. This adds the convention (what the
+ * pointers mean and how to load one), plus the pointer lines only when the
+ * harness' discovery root differs from ours — which happens in a linked
+ * worktree, where agent-instructions roots at the worktree while memory lives
+ * at the main repository root.
+ */
+function renderProjectBlock(root: string, index: ProjectIndex, cwd: string): string {
+  const covered = harnessInstructionRoot(cwd) === root;
+  if (covered) {
+    // AGENTS.md is already in context (resident rules AND pointer lines), so
+    // repeating the pointers would only burn tokens. Add the convention that
+    // the pointers are lazy: nothing here is loaded until the model reads it.
+    return [
+      '### Project memory',
+      'This repository keeps its long-term memory in `AGENTS.md` (loaded above): its non-pointer lines are always-on rules, and its `@memory/*.md` lines index topic files.',
+      'Those topic files are NOT in context — load one with `project_memory read` (or `read`) before working on that topic.',
+      'Record new durable project knowledge with `project_memory write` / `append`; the index line is maintained for you.',
+    ].join('\n');
+  }
+  // The harness did not load this AGENTS.md, so neither the pointers nor the
+  // resident rules are in context. This is the linked-worktree case:
+  // agent-instructions roots at the worktree (it holds the `.git` marker file)
+  // while the memory lives at the main repository root. Emit both here.
+  const topics = index.entries.map((e) => `${e.file}${e.summary ? ` — ${e.summary}` : ''}`);
+  const lines = [
+    '### Project memory',
+    `This repository keeps its long-term memory at \`${root}\` — but \`AGENTS.md\` there is not auto-loaded in this working directory, so it is reproduced here.`,
+    'Topic files are NOT in context; load one with `project_memory read` (or `read`) before working on that topic:',
+    ...topics.map((t) => `- ${t}`),
+  ];
+  const resident = index.resident.join('\n').trim();
+  if (resident) lines.push('', '#### Always-on rules (from AGENTS.md)', resident);
+  return lines.join('\n');
+}
+
+/**
+ * Where the harness' own instruction discovery roots this cwd: the nearest
+ * ancestor that contains a `.git` entry (either a directory or the pointer
+ * file of a linked worktree), or cwd itself when there is none. Mirrors
+ * `@deepseek-ai/dsh-agent-instructions` so the two agree on AGENTS.md scope.
+ */
+function harnessInstructionRoot(cwd: string): string {
+  let current = path.resolve(cwd);
+  for (;;) {
+    if (fs.existsSync(path.join(current, '.git'))) return current;
+    const parent = path.dirname(current);
+    if (parent === current) return path.resolve(cwd);
+    current = parent;
+  }
 }
 
 export function apply(ctx: Context, config?: Record<string, unknown>): void {
@@ -158,7 +266,14 @@ export function apply(ctx: Context, config?: Record<string, unknown>): void {
     failureCharLimit: 10000, // hermes: failures get memoryCharLimit * 2
     // project memory (projects-memory/<name>/MEMORY.md, Pi-compatible root)
     projectEnabled: true,
-    projectCharLimit: 5000,
+    // 单个 memory/<topic>.md 的字符上限（主题拆分后每个文件可以比全局记忆大）
+    projectFileCharLimit: 20000,
+    // AGENTS.md 常驻区字符预算：只放操作性硬约束，细节进 memory/
+    projectResidentCharLimit: 3000,
+    // AGENTS.md 索引区（@memory/... 行）字符预算
+    projectIndexCharLimit: 4000,
+    // 已有 prose AGENTS.md 时是否允许辅助 LLM 自动改造成常驻+索引
+    projectAutoMigrate: true,
     // FTS5 memory mirror (Extended Store): full-text ranking for memory_search
     memoryFtsEnabled: true,
     // Semantic (vector) memory search: a DSH-side SQLite cache storing ONLY
@@ -191,19 +306,9 @@ export function apply(ctx: Context, config?: Record<string, unknown>): void {
   };
   cfg.dir = resolveDir(config); // explicit config.dir wins; defaults re-resolved
 
-  const projectsRoot = resolveProjectsRoot(cfg.dir);
-  const projectStores = new Map<string, MemoryStore>();
-  const getProjectStore = (name: string): MemoryStore => {
-    let ps = projectStores.get(name);
-    if (!ps) {
-      ps = createMemoryStore({ dir: path.join(projectsRoot, name), limits: { memory: cfg.projectCharLimit ?? 5000 } });
-      projectStores.set(name, ps);
-    }
-    return ps;
-  };
-
+  const memoryDir = cfg.dir;
   const store = createMemoryStore({
-    dir: cfg.dir,
+    dir: memoryDir,
     limits: {
       memory: cfg.memoryCharLimit,
       user: cfg.userCharLimit,
@@ -226,9 +331,40 @@ export function apply(ctx: Context, config?: Record<string, unknown>): void {
     provider: embedding,
   });
 
-  registerMemoryTool(ctx, store, cfg as MemoryToolConfig, getProjectStore);
-  registerMemorySearchTool(ctx, store, cfg, getProjectStore, fts, vector);
+  registerMemoryTool(ctx, store, cfg as MemoryToolConfig);
+  registerMemorySearchTool(ctx, store, cfg, fts, vector);
   registerLifecycleHooks(ctx, store, cfg as LearningConfig);
+
+  // 最近一次请求用过的模型路由。辅助 LLM 特性（学习、合并、迁移）都复用它；
+  // 管理页可能在任何会话出现之前被打开，所以这里按事件更新、按需读取。
+  let lastRoute: LlmRoute | undefined;
+  ctx.on('session/event', (_session, event) => {
+    if (event.type !== 'request/header') return;
+    const config = event.data?.header?.config;
+    if (config?.provider && config?.model) lastRoute = { provider: config.provider, model: config.model };
+  });
+
+  // 项目记忆：AGENTS.md（常驻区 + @ 指针索引）+ memory/ 主题文件。
+  // 作用域 = 会话工作目录所属的 git 仓库根（worktree 共享），无 project 参数。
+  if (cfg.projectEnabled) {
+    const cwdOf = (exec: { agent?: { session?: unknown } }): string | null => {
+      const session = exec.agent?.session;
+      if (!session) return null;
+      return cwdFromSession(ctx, session);
+    };
+    registerProjectMemoryTool(ctx, {
+      config: {
+        projectFileCharLimit: cfg.projectFileCharLimit,
+        projectResidentCharLimit: cfg.projectResidentCharLimit,
+        projectIndexCharLimit: cfg.projectIndexCharLimit,
+        projectAutoMigrate: cfg.projectAutoMigrate,
+        enableSecretScanning: cfg.enableSecretScanning,
+        searchMaxResults: cfg.searchMaxResults,
+        memoryDir: cfg.dir,
+      },
+      cwdOf: cwdOf as never,
+    });
+  }
 
   // 记忆管理设置页（browser half）：/api/persona-memory/* 路由。
   // 配置写回目标 = 当前 profile 的 cordis.patch.yml 中 persona-memory 段。
@@ -239,6 +375,8 @@ export function apply(ctx: Context, config?: Record<string, unknown>): void {
       standing,
       vector,
       cfg,
+      ctx,
+      getRoute: () => lastRoute,
       profilePatch: profilePatchPath(profileName),
       log: (s) => ctx.logger.info(s),
     });
@@ -287,16 +425,17 @@ export function apply(ctx: Context, config?: Record<string, unknown>): void {
       });
     }
     if (cfg.projectEnabled) {
-      ctx.systemPrompt.variable('project_block', (context: { agent?: { session?: { header?: { cwd?: string } } } }) => {
+      ctx.systemPrompt.variable('project_block', (context) => {
         if (hidden(context)) return '';
-        const cwd = context?.agent?.session?.header?.cwd;
+        const session = sessionOf(context) as { header?: { cwd?: string } } | undefined;
+        const cwd = session ? cwdFromSession(ctx, session) : null;
         if (!cwd) return '';
-        const project = detectProject(cwd, projectsRoot);
-        if (!project.name) return '';
-        const ps = getProjectStore(project.name);
-        const read = ps.readSync('memory', cfg.projectCharLimit ?? 5000);
-        if (!read.exists || read.entryCount === 0) return '';
-        return `### Project memory (${project.name})\n${read.content}`;
+        const root = resolveProjectRoot(cwd);
+        if (!root) return '';
+        const index = readIndexCached(root);
+        if (!index.exists || index.entries.length === 0) return '';
+        registerProject(memoryDir, root);
+        return renderProjectBlock(root, index, cwd);
       });
       ctx.systemPrompt.section({
         name: 'memory:project',

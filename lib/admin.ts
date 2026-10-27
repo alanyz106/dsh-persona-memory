@@ -29,7 +29,23 @@ import os from 'node:os';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { parseEntries, decodeEntry, ENTRY_DELIMITER, isEnoent, type DecodedEntry, type MemoryKind, type MemoryStore } from './memory-store.js';
 import { parseInstructions, normalizeInstruction, type StandingStore } from './standing.js';
+import {
+  readIndex,
+  readMemoryFile,
+  writeMemoryFile,
+  deleteMemoryFile,
+  mutateIndex,
+  safeMemoryRel,
+  residentChars,
+  indexChars,
+  type ProjectIndex,
+} from './project-memory.js';
+import { listRegistered, rootForName, registerProject, type RegisteredProject } from './project-registry.js';
+import { migrateAgents } from './project-migrate.js';
+import { scanContent } from './secret-scanner.js';
+import type { LlmRoute } from './llm-helper.js';
 import type { VectorIndex } from './vector-index.js';
+import type { Context } from '@deepseek-ai/cordis';
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver';
 
 /** Cap on JSON request bodies (admin payloads are small). */
@@ -39,6 +55,15 @@ const MAX_JSON_BODY_BYTES = 64 * 1024;
 function cfgStr(cfg: Record<string, unknown>, key: string, fallback: string): string {
   const v = cfg[key];
   return typeof v === 'string' && v.trim() !== '' ? v : fallback;
+}
+
+/** Read a config value as a boolean (accepting the string form), else the fallback. */
+function cfgBool(cfg: Record<string, unknown>, key: string, fallback: boolean): boolean {
+  const v = cfg[key];
+  if (typeof v === 'boolean') return v;
+  if (v === 'true') return true;
+  if (v === 'false') return false;
+  return fallback;
 }
 
 /** Read a config value as a finite number, else the fallback. */
@@ -255,15 +280,6 @@ export function resolveMemoryDir(cfg: Record<string, unknown>): string {
   return path.join(os.homedir(), '.dsh', 'memory');
 }
 
-/** Resolve the projects memory root (mirrors lib/projects.ts resolveProjectsRoot). */
-export function resolveProjectsRoot(memoryDir: string): string {
-  const piDir = path.join(os.homedir(), '.pi', 'agent', 'pi-hermes-memory');
-  if (path.resolve(memoryDir) === path.resolve(piDir)) {
-    return path.join(os.homedir(), '.pi', 'agent', 'projects-memory');
-  }
-  return path.join(memoryDir, 'projects-memory');
-}
-
 // ------------------------------------------------------------- schema
 
 export interface SchemaField {
@@ -306,8 +322,11 @@ export const CFG_SCHEMA: SchemaField[] = [
   { key: 'failureMaxAgeDays', type: 'number', label: '失败记忆天数', group: '失败' },
   { key: 'failureMaxEntries', type: 'number', label: '失败记忆条数', group: '失败' },
   { key: 'failureCharLimit', type: 'number', label: '失败字符上限', group: '失败' },
-  { key: 'projectEnabled', type: 'bool', label: '项目记忆', group: '项目', help: '按会话 cwd 自动注入' },
-  { key: 'projectCharLimit', type: 'number', label: '项目字符上限', group: '项目' },
+  { key: 'projectEnabled', type: 'bool', label: '项目记忆', group: '项目', help: '按会话 cwd 定位 git 仓库根，读写其 AGENTS.md + memory/' },
+  { key: 'projectFileCharLimit', type: 'number', label: '单文件字符上限', group: '项目', help: '每个 memory/<主题>.md 的上限' },
+  { key: 'projectResidentCharLimit', type: 'number', label: '常驻区预算', group: '项目', help: 'AGENTS.md 常驻区字符上限' },
+  { key: 'projectIndexCharLimit', type: 'number', label: '索引区预算', group: '项目', help: '@memory/ 指针行总字符上限' },
+  { key: 'projectAutoMigrate', type: 'bool', label: '自动迁移旧 AGENTS.md', group: '项目', help: '首次写入时用辅助 LLM 把 prose AGENTS.md 拆成常驻+索引' },
   { key: 'memoryFtsEnabled', type: 'bool', label: 'FTS5 全文索引', group: '检索' },
   { key: 'vectorEnabled', type: 'bool', label: '向量搜索', group: '向量', help: 'FTS5+向量 RRF 混合检索' },
   { key: 'vectorIndexDir', type: 'string', label: '向量索引目录', group: '向量', help: '默认 $DSH_HOME/memory' },
@@ -332,7 +351,9 @@ export const CFG_DEFAULTS: Record<string, unknown> = {
   learnRecentTurns: 2, learnMaxChars: 6000,
   learnTimeoutMs: 120000, autoConsolidate: true, consolidateStaleDays: 30, consolidateTimeoutMs: 120000,
   standingEnabled: true, standingCharLimit: 2000, standingMaxEntries: 20, failureInjectionEnabled: true,
-  failureMaxAgeDays: 7, failureMaxEntries: 5, failureCharLimit: 10000, projectEnabled: true, projectCharLimit: 5000,
+  failureMaxAgeDays: 7, failureMaxEntries: 5, failureCharLimit: 10000,
+  projectEnabled: true, projectFileCharLimit: 20000, projectResidentCharLimit: 3000,
+  projectIndexCharLimit: 4000, projectAutoMigrate: true,
   memoryFtsEnabled: true, vectorEnabled: false, embeddingProvider: 'remote', embeddingModel: 'text-embedding-3-small',
   embeddingRemoteHost: 'https://huggingface.co', adminProfile: 'web', adminAllowedHosts: '',
   autoBackupMin: 60, autoSwitchOnPiLoss: true,
@@ -476,21 +497,50 @@ async function copyIfExists(src: string, dst: string): Promise<boolean> {
   }
 }
 
-/** Backup all memory files + project memories into latest/ (overwrite). */
+/** Backup subdirectory holding per-project snapshots. */
+const PROJECT_BACKUP_DIR = 'projects';
+
+/** Recursively copy a directory, skipping dot-entries unless allowed. */
+async function copyTree(src: string, dst: string, skipDots = true): Promise<number> {
+  let count = 0;
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(src, { withFileTypes: true });
+  } catch {
+    return 0;
+  }
+  for (const entry of entries) {
+    if (skipDots && entry.name.startsWith('.')) continue;
+    const from = path.join(src, entry.name);
+    const to = path.join(dst, entry.name);
+    if (entry.isDirectory()) {
+      count += await copyTree(from, to, skipDots);
+    } else if (entry.isFile()) {
+      if (await copyIfExists(from, to)) count++;
+    }
+  }
+  return count;
+}
+
+/**
+ * Backup all memory into latest/ (overwrite).
+ *
+ * Global stores are flat files; project memory now lives inside each
+ * repository, so it is snapshotted as `latest/projects/<name>/{AGENTS.md,memory/**}`
+ * driven by the registry (`.trash` and dot-entries are skipped — trash is
+ * intentionally excluded from backups).
+ */
 export async function backupAll(cfg: Record<string, unknown>): Promise<{ ok: boolean; message: string }> {
   const dir = resolveMemoryDir(cfg);
   let count = 0;
   for (const name of MEMORY_FILES) {
     if (await copyIfExists(path.join(dir, name), path.join(BACKUP_LATEST, name))) count++;
   }
-  try {
-    const projRoot = resolveProjectsRoot(dir);
-    for (const e of fs.readdirSync(projRoot, { withFileTypes: true })) {
-      if (!e.isDirectory() || e.name.startsWith('.')) continue;
-      if (await copyIfExists(path.join(projRoot, e.name, 'MEMORY.md'), path.join(BACKUP_LATEST, PROJECT_PREFIX + e.name + '.md'))) count++;
-    }
-  } catch {
-    // no projects root yet — fine
+  for (const project of listRegistered(dir)) {
+    if (!project.exists) continue;
+    const target = path.join(BACKUP_LATEST, PROJECT_BACKUP_DIR, project.name);
+    if (await copyIfExists(path.join(project.root, 'AGENTS.md'), path.join(target, 'AGENTS.md'))) count++;
+    count += await copyTree(path.join(project.root, 'memory'), path.join(target, 'memory'));
   }
   return { ok: true, message: `备份完成（${count} 个文件）→ ${BACKUP_LATEST}` };
 }
@@ -506,16 +556,11 @@ export async function restoreFromLatest(cfg: Record<string, unknown>, targetDir?
   for (const f of MEMORY_FILES) {
     if (await copyIfExists(path.join(BACKUP_LATEST, f), path.join(dir, f))) count++;
   }
-  try {
-    const projRoot = resolveProjectsRoot(dir);
-    for (const e of fs.readdirSync(BACKUP_LATEST, { withFileTypes: true })) {
-      if (!e.isFile() || !e.name.startsWith(PROJECT_PREFIX) || !e.name.endsWith('.md')) continue;
-      const pname = e.name.slice(PROJECT_PREFIX.length, -'.md'.length);
-      if (!pname || !/^[A-Za-z0-9._-]+$/.test(pname)) continue;
-      if (await copyIfExists(path.join(BACKUP_LATEST, e.name), path.join(projRoot, pname, 'MEMORY.md'))) count++;
-    }
-  } catch {
-    // fine
+  for (const project of listRegistered(dir)) {
+    const source = path.join(BACKUP_LATEST, PROJECT_BACKUP_DIR, project.name);
+    if (!fs.existsSync(source)) continue;
+    if (await copyIfExists(path.join(source, 'AGENTS.md'), path.join(project.root, 'AGENTS.md'))) count++;
+    count += await copyTree(path.join(source, 'memory'), path.join(project.root, 'memory'));
   }
   return count;
 }
@@ -527,6 +572,14 @@ export interface AdminRouteDeps {
   standing: StandingStore;
   cfg: Record<string, unknown>;
   vector: VectorIndex;
+  /** plugin context — needed by the LLM-driven AGENTS.md migration */
+  ctx: Context;
+  /**
+   * Resolve the model route used by the migration planner. Called per request
+   * because a route only exists after a session has issued a request; the
+   * admin page can be opened before any session exists.
+   */
+  getRoute?: () => LlmRoute | undefined;
   /** absolute path to the active profile's cordis.patch.yml */
   profilePatch: string;
   log: (s: string) => void;
@@ -654,49 +707,66 @@ export function makeAdminRoutes(deps: AdminRouteDeps): WebRoute[] {
     return { dir, models };
   }
 
+  interface ProjectEntryInfo {
+    file: string;
+    summary: string;
+    exists: boolean;
+    chars: number;
+  }
+
   interface ProjectInfo {
     name: string;
+    root: string;
     exists: boolean;
-    entries: number;
-    chars: number;
-    entryList: DecodedEntry[];
+    resident: string[];
+    residentChars: number;
+    residentLimit: number;
+    indexChars: number;
+    indexLimit: number;
+    entries: ProjectEntryInfo[];
+    orphans: string[];
   }
 
-  /** List project memories. */
+  /**
+   * List every registered project with its parsed AGENTS.md index.
+   *
+   * The registry (not a directory scan) is the source because a project's
+   * memory lives inside the repository.
+   */
   function listProjects(): ProjectInfo[] {
-    const projRoot = resolveProjectsRoot(cfgStr(cfg, 'dir', resolveMemoryDir(cfg)));
-    const out: ProjectInfo[] = [];
-    let entries: fs.Dirent[];
-    try {
-      entries = fs.readdirSync(projRoot, { withFileTypes: true });
-    } catch {
-      return out;
-    }
-    for (const e of entries) {
-      if (!e.isDirectory() || e.name.startsWith('.')) continue;
-      const file = path.join(projRoot, e.name, 'MEMORY.md');
-      const raw = readRaw(file);
-      const entryList = raw !== null ? parseEntries(raw).map((x) => decodeEntry(x)) : [];
-      out.push({ name: e.name, exists: raw !== null, entries: entryList.length, chars: raw !== null ? raw.length : 0, entryList });
-    }
-    out.sort((a, b) => a.name.localeCompare(b.name));
-    return out;
+    const memoryDir = cfgStr(cfg, 'dir', resolveMemoryDir(cfg));
+    const residentLimit = cfgNum(cfg, 'projectResidentCharLimit', 3000);
+    const indexLimit = cfgNum(cfg, 'projectIndexCharLimit', 4000);
+    return listRegistered(memoryDir).map((record: RegisteredProject): ProjectInfo => {
+      const index: ProjectIndex = record.exists
+        ? readIndex(record.root)
+        : { root: record.root, agentsFile: path.join(record.root, 'AGENTS.md'), memoryDir: path.join(record.root, 'memory'), exists: false, resident: [], entries: [], orphans: [] };
+      return {
+        name: record.name,
+        root: record.root,
+        exists: record.exists,
+        resident: index.resident,
+        residentChars: residentChars(index.resident),
+        residentLimit,
+        indexChars: indexChars(index.entries),
+        indexLimit,
+        entries: index.entries.map((e) => ({ file: e.file, summary: e.summary, exists: e.exists, chars: e.chars })),
+        orphans: index.orphans,
+      };
+    });
   }
 
-  /** Mutate one project memory file. */
-  function mutateProject(project: string, change: StoreChange): MutateOutcome {
-    const projRoot = resolveProjectsRoot(cfgStr(cfg, 'dir', resolveMemoryDir(cfg)));
-    if (!project || !/^[A-Za-z0-9._-]+$/.test(project) || project.includes('..')) {
-      return { ok: false, error: 'invalid project name' };
-    }
-    const file = path.join(projRoot, project, 'MEMORY.md');
-    const raw = readRaw(file);
-    const list = raw !== null ? parseEntries(raw).map((x) => decodeEntry(x)) : [];
-    const outcome = change(list);
-    if (outcome.error) return { ok: false, error: outcome.error };
-    const next = outcome.next!.map((e) => encodeEntry(e.text, e.created, e.lastReferenced));
-    writeRawAtomic(file, next.length ? next.join(ENTRY_DELIMITER) : '');
-    return { ok: true, message: outcome.message ?? `${project} 已更新（${next.length} 条）` };
+  /**
+   * Resolve a registry name to its absolute root.
+   *
+   * Every project route goes through this: the admin API must never accept a
+   * path from the browser, or it becomes an arbitrary file read/write surface.
+   *
+   * @returns the root, or null when the name is unknown
+   */
+  function projectRoot(name: string): string | null {
+    const memoryDir = cfgStr(cfg, 'dir', resolveMemoryDir(cfg));
+    return rootForName(memoryDir, name);
   }
 
   /**
@@ -869,32 +939,150 @@ export function makeAdminRoutes(deps: AdminRouteDeps): WebRoute[] {
       });
       writeJson(res, result.ok ? 200 : 400, result);
     } },
-    { kind: 'exact', path: '/api/persona-memory/projectUpdate', handler: async (req: IncomingMessage, res: ServerResponse) => {
+    { kind: 'exact', path: '/api/persona-memory/projectRead', handler: async (req: IncomingMessage, res: ServerResponse) => {
       if (!guard(req, res, 'POST')) return;
       const body = await readJsonBody(req);
       if (body === undefined) { writeJson(res, 400, { error: 'invalid JSON body' }); return; }
-      const project = String(body.project || '');
-      const index = Number(body.index);
-      const text = String(body.text || '').trim();
-      if (!text) { writeJson(res, 400, { error: '内容不能为空' }); return; }
-      const result = mutateProject(project, (list) => {
-        if (!Number.isInteger(index) || index < 0 || index >= list.length) return { error: 'index out of range' };
-        const next = list.map((e, i) => i === index ? { ...e, text, lastReferenced: today() } : e);
-        return { next, message: `${project} 条目已更新` };
-      });
-      writeJson(res, result.ok ? 200 : 400, result);
+      const root = projectRoot(String(body.project || ''));
+      if (!root) { writeJson(res, 404, { error: '未知项目' }); return; }
+      const rel = safeMemoryRel(root, body.file);
+      if (!rel) { writeJson(res, 400, { error: '非法记忆文件名' }); return; }
+      const content = readMemoryFile(root, rel);
+      if (content === null) { writeJson(res, 404, { error: `${rel} 不存在` }); return; }
+      const summary = readIndex(root).entries.find((e) => e.file === rel)?.summary ?? '';
+      writeJson(res, 200, { file: rel, summary, chars: content.length, content });
+    } },
+    { kind: 'exact', path: '/api/persona-memory/projectWrite', handler: async (req: IncomingMessage, res: ServerResponse) => {
+      if (!guard(req, res, 'POST')) return;
+      const body = await readJsonBody(req);
+      if (body === undefined) { writeJson(res, 400, { error: 'invalid JSON body' }); return; }
+      const root = projectRoot(String(body.project || ''));
+      if (!root) { writeJson(res, 404, { error: '未知项目' }); return; }
+      const rel = safeMemoryRel(root, body.file);
+      if (!rel) { writeJson(res, 400, { error: '非法记忆文件名' }); return; }
+      const content = String(body.content ?? '');
+      const blocked = cfgBool(cfg, 'enableSecretScanning', true) ? scanContent(content) : null;
+      if (blocked) { writeJson(res, 400, { error: `内容被拒绝：${blocked}` }); return; }
+      // A summary is optional here: editing a file's body must not silently
+      // rewrite its index line, but supplying one updates it.
+      const summary = typeof body.summary === 'string' ? body.summary : undefined;
+      if (summary !== undefined) {
+        const trimmed = summary.trim();
+        const blockedSummary = scanContent(trimmed);
+        if (blockedSummary) { writeJson(res, 400, { error: `描述被拒绝：${blockedSummary}` }); return; }
+        const indexed = await mutateIndex(root, ({ resident, entries }) => {
+          const exists = entries.some((e) => e.file === rel);
+          const next = exists
+            ? entries.map((e) => (e.file === rel ? { ...e, summary: trimmed } : e))
+            : [...entries, { file: rel, summary: trimmed, exists: true, chars: 0 }];
+          return { resident, entries: next };
+        }, { residentCharLimit: cfgNum(cfg, 'projectResidentCharLimit', 3000), indexCharLimit: cfgNum(cfg, 'projectIndexCharLimit', 4000) });
+        if (!indexed.ok) { writeJson(res, 400, { error: indexed.error }); return; }
+      }
+      const wrote = await writeMemoryFile(root, rel, content, cfgNum(cfg, 'projectFileCharLimit', 20000));
+      if (!wrote.ok) { writeJson(res, 400, { error: wrote.error }); return; }
+      log(`admin: wrote ${rel} in ${root}`);
+      writeJson(res, 200, { ok: true, message: `${rel} 已保存（${wrote.chars} 字符）`, file: rel, chars: wrote.chars });
+    } },
+    { kind: 'exact', path: '/api/persona-memory/projectCreate', handler: async (req: IncomingMessage, res: ServerResponse) => {
+      if (!guard(req, res, 'POST')) return;
+      const body = await readJsonBody(req);
+      if (body === undefined) { writeJson(res, 400, { error: 'invalid JSON body' }); return; }
+      const root = projectRoot(String(body.project || ''));
+      if (!root) { writeJson(res, 404, { error: '未知项目' }); return; }
+      const rel = safeMemoryRel(root, body.file);
+      if (!rel) { writeJson(res, 400, { error: '非法记忆文件名（需以 .md 结尾）' }); return; }
+      const summary = String(body.summary ?? '').trim();
+      if (!summary) { writeJson(res, 400, { error: '描述不能为空' }); return; }
+      const content = String(body.content ?? '');
+      if (!content.trim()) { writeJson(res, 400, { error: '内容不能为空' }); return; }
+      if (cfgBool(cfg, 'enableSecretScanning', true)) {
+        const blocked = scanContent(content) ?? scanContent(summary);
+        if (blocked) { writeJson(res, 400, { error: `内容被拒绝：${blocked}` }); return; }
+      }
+      const wrote = await writeMemoryFile(root, rel, content, cfgNum(cfg, 'projectFileCharLimit', 20000));
+      if (!wrote.ok) { writeJson(res, 400, { error: wrote.error }); return; }
+      const indexed = await mutateIndex(root, ({ resident, entries }) => ({
+        resident,
+        entries: entries.some((e) => e.file === rel)
+          ? entries
+          : [...entries, { file: rel, summary, exists: true, chars: content.length }],
+      }), { residentCharLimit: cfgNum(cfg, 'projectResidentCharLimit', 3000), indexCharLimit: cfgNum(cfg, 'projectIndexCharLimit', 4000) });
+      if (!indexed.ok) { writeJson(res, 400, { error: indexed.error }); return; }
+      log(`admin: created ${rel} in ${root}`);
+      writeJson(res, 200, { ok: true, message: `已新建 ${rel} 并加入索引`, file: rel });
     } },
     { kind: 'exact', path: '/api/persona-memory/projectDelete', handler: async (req: IncomingMessage, res: ServerResponse) => {
       if (!guard(req, res, 'POST')) return;
       const body = await readJsonBody(req);
       if (body === undefined) { writeJson(res, 400, { error: 'invalid JSON body' }); return; }
-      const project = String(body.project || '');
-      const index = Number(body.index);
-      const result = mutateProject(project, (list) => {
-        if (!Number.isInteger(index) || index < 0 || index >= list.length) return { error: 'index out of range' };
-        return { next: list.filter((_, i) => i !== index), message: `${project} 条目已删除` };
+      const root = projectRoot(String(body.project || ''));
+      if (!root) { writeJson(res, 404, { error: '未知项目' }); return; }
+      const rel = safeMemoryRel(root, body.file);
+      if (!rel) { writeJson(res, 400, { error: '非法记忆文件名' }); return; }
+      const removed = await deleteMemoryFile(root, rel);
+      const cleared = await mutateIndex(root, ({ resident, entries }) => ({
+        resident,
+        entries: entries.filter((e) => e.file !== rel),
+      }), { residentCharLimit: cfgNum(cfg, 'projectResidentCharLimit', 3000), indexCharLimit: cfgNum(cfg, 'projectIndexCharLimit', 4000) });
+      if (!cleared.ok) { writeJson(res, 400, { error: cleared.error }); return; }
+      log(`admin: deleted ${rel} in ${root}`);
+      writeJson(res, 200, {
+        ok: true,
+        message: removed.ok ? `${rel} 已删除（移入 ${removed.trashed}）` : `${rel} 的索引已移除`,
+        trashed: removed.ok ? removed.trashed : undefined,
       });
-      writeJson(res, result.ok ? 200 : 400, result);
+    } },
+    { kind: 'exact', path: '/api/persona-memory/projectResident', handler: async (req: IncomingMessage, res: ServerResponse) => {
+      if (!guard(req, res, 'POST')) return;
+      const body = await readJsonBody(req);
+      if (body === undefined) { writeJson(res, 400, { error: 'invalid JSON body' }); return; }
+      const root = projectRoot(String(body.project || ''));
+      if (!root) { writeJson(res, 404, { error: '未知项目' }); return; }
+      const text = String(body.content ?? '');
+      if (cfgBool(cfg, 'enableSecretScanning', true)) {
+        const blocked = scanContent(text);
+        if (blocked) { writeJson(res, 400, { error: `内容被拒绝：${blocked}` }); return; }
+      }
+      const resident = text.split('\n').map((line) => line.replace(/\s+$/, ''));
+      const result = await mutateIndex(root, ({ entries }) => ({ resident, entries }), {
+        residentCharLimit: cfgNum(cfg, 'projectResidentCharLimit', 3000),
+        indexCharLimit: cfgNum(cfg, 'projectIndexCharLimit', 4000),
+      });
+      if (!result.ok) { writeJson(res, 400, { error: result.error }); return; }
+      log(`admin: updated resident block in ${root}`);
+      writeJson(res, 200, { ok: true, message: `常驻区已保存（${residentChars(resident)} 字符）` });
+    } },
+    { kind: 'exact', path: '/api/persona-memory/projectMigrate', handler: async (req: IncomingMessage, res: ServerResponse) => {
+      if (!guard(req, res, 'POST')) return;
+      const body = await readJsonBody(req);
+      if (body === undefined) { writeJson(res, 400, { error: 'invalid JSON body' }); return; }
+      const root = projectRoot(String(body.project || ''));
+      if (!root) { writeJson(res, 404, { error: '未知项目' }); return; }
+      try {
+        const result = await migrateAgents(deps.ctx, root, deps.getRoute?.(), {
+          apply: body.apply === true,
+          scan: cfgBool(cfg, 'enableSecretScanning', true),
+          fileCharLimit: cfgNum(cfg, 'projectFileCharLimit', 20000),
+          residentCharLimit: cfgNum(cfg, 'projectResidentCharLimit', 3000),
+          indexCharLimit: cfgNum(cfg, 'projectIndexCharLimit', 4000),
+        });
+        log(`admin: migrate ${root} -> ${result.migrated ? 'applied' : result.reason}`);
+        writeJson(res, result.migrated ? 200 : 400, result);
+      } catch (e) {
+        writeJson(res, 500, { error: e instanceof Error ? e.message : String(e) });
+      }
+    } },
+    { kind: 'exact', path: '/api/persona-memory/projectRegister', handler: async (req: IncomingMessage, res: ServerResponse) => {
+      if (!guard(req, res, 'POST')) return;
+      const body = await readJsonBody(req);
+      if (body === undefined) { writeJson(res, 400, { error: 'invalid JSON body' }); return; }
+      const raw = String(body.root || '').trim();
+      if (!raw || !path.isAbsolute(raw) || !fs.existsSync(raw)) { writeJson(res, 400, { error: '需要已存在的绝对路径' }); return; }
+      const memoryDir = cfgStr(cfg, 'dir', resolveMemoryDir(cfg));
+      const record = registerProject(memoryDir, raw);
+      log(`admin: registered project ${record.name} -> ${record.root}`);
+      writeJson(res, 200, { ok: true, message: `已登记 ${record.name}`, project: record });
     } },
     { kind: 'exact', path: '/api/persona-memory/backup', handler: async (req: IncomingMessage, res: ServerResponse) => {
       if (!guard(req, res, 'POST')) return;

@@ -1,6 +1,7 @@
 /**
  * The `memory_search` tool: search across the persistent persona memory
- * (MEMORY.md, USER.md, failures.md, and per-project stores).
+ * (MEMORY.md, USER.md, failures.md). Project-scoped memory lives in the
+ * repository itself and is searched with `project_memory search`.
  *
  * Retrieval pipeline (most capable first):
  * 1. HYBRID — FTS5 exact/full-text ranking fused with semantic vector ranking
@@ -13,7 +14,6 @@
  */
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import type { JsonValue } from './json-value.js';
-import { safeProjectName } from './projects.js';
 import type { MemoryKind, MemoryStore } from './memory-store.js';
 import type { FtsIndex } from './fts.js';
 import type { VectorIndex } from './vector-index.js';
@@ -62,7 +62,6 @@ export function registerMemorySearchTool(
   ctx: Context,
   store: MemoryStore,
   config: { searchMaxResults: number },
-  getProjectStore: (name: string) => MemoryStore,
   fts?: FtsIndex,
   vector?: VectorIndex,
 ): void {
@@ -73,7 +72,7 @@ export function registerMemorySearchTool(
         'Search the persistent long-term persona memory (facts, preferences, conventions, failures, user profile) ' +
         'for entries related to `query`. Uses hybrid retrieval (full-text FTS5 + semantic vector ranking when enabled), ' +
         'else full-text ranking, else substring matching. ' +
-        'Pass `project` to search one project\'s scoped memory instead.',
+        'For project-specific memory (AGENTS.md index + memory/*.md topics) use `project_memory search` instead.',
       parameters: {
         query: {
           type: 'string',
@@ -83,11 +82,7 @@ export function registerMemorySearchTool(
         which: {
           type: 'string',
           enum: ['memory', 'user', 'failure', 'all'],
-          description: 'Where to search (ignored when `project` is set). Default: all.',
-        },
-        project: {
-          type: 'string',
-          description: 'Project name to search its scoped memory.',
+          description: 'Where to search. Default: all.',
         },
       },
       output: {
@@ -100,17 +95,6 @@ export function registerMemorySearchTool(
         const query = (args.query ?? '').trim();
         if (!query) {
           return { query, matchCount: 0, matches: [] } as unknown as Record<string, JsonValue>;
-        }
-        const projectName = (args.project !== undefined && args.project !== null && String(args.project).trim() !== ''
-          ? safeProjectName(args.project)
-          : undefined) ?? undefined;
-        if (projectName) {
-          // NOTE: store.search(query, which, max) — the original JS passed
-          // ('memory', query, max), swapping query/which and silently searching
-          // the literal "memory" in the user's query as the which-filter.
-          const hits = await getProjectStore(projectName).search(query, 'memory', config.searchMaxResults);
-          const matches = hits.map((h) => ({ ...h, which: `project:${projectName}` }));
-          return { query, matchCount: matches.length, matches } as unknown as Record<string, JsonValue>;
         }
         const which = (args.which ?? 'all') as MemoryKind | 'all';
         // Fetch both engines with a little headroom so fusion can re-rank.

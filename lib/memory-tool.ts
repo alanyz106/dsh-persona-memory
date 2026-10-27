@@ -9,7 +9,6 @@ import type { JsonValue } from './json-value.js';
 import { maybeConsolidate, type ConsolidationConfig } from './consolidate.js';
 import { buildFailureText } from './failures.js';
 import { latestRoute, type LlmRoute } from './llm-helper.js';
-import { safeProjectName } from './projects.js';
 import { scanContent } from './secret-scanner.js';
 import type { MemoryKind, MemoryStore } from './memory-store.js';
 import type { Context } from '@deepseek-ai/cordis';
@@ -26,13 +25,10 @@ function limitFor(which: MemoryKind, config: { memoryCharLimit: number; userChar
   return config.memoryCharLimit;
 }
 
-export type ProjectStoreProvider = (name: string) => MemoryStore;
-
 export function registerMemoryTool(
   ctx: Context,
   store: MemoryStore,
   config: MemoryToolConfig,
-  getProjectStore: ProjectStoreProvider,
 ): void {
   ctx.tools.register(
     defineTool({
@@ -42,7 +38,7 @@ export function registerMemoryTool(
         'Stores: `memory` (global facts, preferences, conventions, environment details), `user` ' +
         '(who the user is, their preferences and communication style), `failure` ' +
         '(failures and lessons — recent ones are injected every request so mistakes are not repeated), ' +
-        'and per-project memory via the `project` parameter (project-specific conventions and decisions). ' +
+        'Project-specific knowledge does NOT belong here — use the `project_memory` tool for that. ' +
         'Actions: read (show current memory), add (append one entry), update (replace an entry ' +
         'whose text contains `match`), delete (remove an entry whose text contains `match`), ' +
         'rewrite (replace the whole file — use for consolidation). Entries are free-form single-line ' +
@@ -57,11 +53,7 @@ export function registerMemoryTool(
         which: {
           type: 'string',
           enum: ['memory', 'user', 'failure'],
-          description: 'Which store to touch (ignored when `project` is set — projects are memory-only). Default: memory.',
-        },
-        project: {
-          type: 'string',
-          description: 'Project name for project-scoped memory (e.g. the repo basename). When set, operates on that project\'s MEMORY.md.',
+          description: 'Which store to touch. Default: memory.',
         },
         category: {
           type: 'string',
@@ -92,16 +84,13 @@ export function registerMemoryTool(
         },
       },
       async execute(args, exec) {
-        const projectName = (args.project !== undefined && args.project !== null && String(args.project).trim() !== ''
-          ? safeProjectName(args.project)
-          : undefined) ?? undefined;
-        const targetStore = projectName ? getProjectStore(projectName) : store;
-        const which = projectName ? 'memory' : (args.which ?? 'memory');
+        const targetStore = store;
+        const which = args.which ?? 'memory';
         if (which !== 'memory' && which !== 'user' && which !== 'failure') {
           throw new HarnessError(`Unknown memory store "${which}"`, 'MEMORY_INVALID_WHICH');
         }
-        const limit = projectName ? (config.projectCharLimit ?? 5000) : limitFor(which, config);
-        const label = projectName ? `project:${projectName}` : which;
+        const limit = limitFor(which, config);
+        const label = which;
 
         let result: Record<string, unknown>;
         switch (args.action) {
@@ -120,7 +109,7 @@ export function registerMemoryTool(
               throw new HarnessError('That failure is already recorded — update it instead of adding a duplicate.', 'MEMORY_DUPLICATE_ENTRY');
             }
             if (result.overflow) {
-              result = await retryAfterConsolidation(args.action, entry, config, ctx, targetStore, routeFor(exec), which, projectName, limit);
+              result = await retryAfterConsolidation(args.action, entry, config, ctx, targetStore, routeFor(exec), which, limit);
             }
             break;
           }
@@ -130,7 +119,7 @@ export function registerMemoryTool(
             rejectBlocked(content, config);
             result = (await targetStore.update(which, match, content)) as unknown as Record<string, unknown>;
             if (result.overflow) {
-              result = await retryAfterConsolidation(args.action, { content, match }, config, ctx, targetStore, routeFor(exec), which, projectName, limit);
+              result = await retryAfterConsolidation(args.action, { content, match }, config, ctx, targetStore, routeFor(exec), which, limit);
             }
             break;
           }
@@ -142,7 +131,7 @@ export function registerMemoryTool(
             rejectBlocked(content, config);
             result = (await targetStore.rewrite(which, content)) as unknown as Record<string, unknown>;
             if (result.overflow) {
-              result = await retryAfterConsolidation(args.action, content, config, ctx, targetStore, routeFor(exec), which, projectName, limit);
+              result = await retryAfterConsolidation(args.action, content, config, ctx, targetStore, routeFor(exec), which, limit);
             }
             break;
           }
@@ -163,7 +152,7 @@ export function registerMemoryTool(
           const route = routeFor(exec);
           if (route) {
             used.consolidating = true;
-            maybeConsolidate(ctx, targetStore, route, config, which, projectName ? (config.projectCharLimit ?? 5000) : undefined).catch((err) =>
+            maybeConsolidate(ctx, targetStore, route, config, which).catch((err) =>
               ctx.logger.warn('[dsh-persona-memory] consolidation trigger failed: %s', (err as Error | undefined)?.message ?? String(err)),
             );
           }
@@ -203,7 +192,6 @@ async function retryAfterConsolidation(
   targetStore: MemoryStore,
   route: LlmRoute | undefined,
   which: MemoryKind,
-  projectName: string | undefined,
   limit: number,
 ): Promise<Record<string, unknown>> {
   if (!config.autoConsolidate || !route) {
@@ -212,7 +200,7 @@ async function retryAfterConsolidation(
       'MEMORY_FULL',
     );
   }
-  await maybeConsolidate(ctx, targetStore, route, config, which, projectName ? limit : undefined);
+  await maybeConsolidate(ctx, targetStore, route, config, which);
   let retried: Record<string, unknown>;
   if (action === 'add') {
     retried = (await targetStore.add(which, payload as string, { dedupe: which === 'failure' })) as unknown as Record<string, unknown>;
@@ -247,8 +235,6 @@ export function withUsage(result: Record<string, unknown>, which: string, limit:
   const pct = limit > 0 ? Math.min(100, Math.round((charCount / limit) * 100)) : 0;
   return {
     ...result,
-    // The caller-passed label (e.g. `project:repo`) wins over the store's
-    // generic which, so project operations render their real path.
     which: which ?? result.which,
     limit,
     usagePct: pct,
@@ -263,9 +249,7 @@ function formatResult(value: unknown): string {
     return usage ? `${v.content}\n\n${usage}` : String(v.content);
   }
   const whichStr = String(v.which ?? '');
-  const file = whichStr.startsWith?.('project:')
-    ? `project/${whichStr.slice(8)}/MEMORY.md`
-    : `memory/${whichStr === 'user' ? 'USER.md' : whichStr === 'failure' ? 'failures.md' : 'MEMORY.md'}`;
+  const file = `memory/${whichStr === 'user' ? 'USER.md' : whichStr === 'failure' ? 'failures.md' : 'MEMORY.md'}`;
   let text: string;
   if (v.added) text = `Saved to ${file}. Now ${v.entryCount} entries (${v.charCount} chars).`;
   else if (v.updated !== undefined) {

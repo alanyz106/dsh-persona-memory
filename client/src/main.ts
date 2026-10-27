@@ -46,7 +46,7 @@ interface StatusPayload {
   standing: { exists: boolean; instructions: string[]; chars: number };
   indexes: { fts: { exists: boolean; size: number }; vector: { exists: boolean; size: number } };
   models: { dir: string; models: Array<{ name: string }> };
-  projects: Array<{ name: string; exists: boolean; entries: number; chars: number; entryList: EntryItem[] }>;
+  projects: ProjectInfo[];
   entries: Record<string, EntryItem[]>;
   ts: number;
 }
@@ -57,10 +57,46 @@ interface EditingState {
   text: string;
 }
 
-interface ProjectEditState {
+interface ProjectEntryInfo {
+  file: string;
+  summary: string;
+  exists: boolean;
+  chars: number;
+}
+
+interface ProjectInfo {
+  name: string;
+  root: string;
+  exists: boolean;
+  resident: string[];
+  residentChars: number;
+  residentLimit: number;
+  indexChars: number;
+  indexLimit: number;
+  entries: ProjectEntryInfo[];
+  orphans: string[];
+}
+
+/** Open-file editor state for one project topic file. */
+interface ProjectFileEditState {
   project: string;
-  index: number;
-  text: string;
+  file: string;
+  summary: string;
+  content: string;
+}
+
+/** Resident-block editor state for one project. */
+interface ProjectResidentEditState {
+  project: string;
+  content: string;
+}
+
+/** New-topic-file draft. */
+interface ProjectCreateState {
+  project: string;
+  file: string;
+  summary: string;
+  content: string;
 }
 
 interface StandingEditState {
@@ -224,8 +260,11 @@ function MemAdminPage(): React.ReactElement {
   const [editing, setEditing] = React.useState<EditingState | null>(null);
   const [confirmDel, setConfirmDel] = React.useState<EditingState | null>(null);
   const [projOpen, setProjOpen] = React.useState<string | null>(null);
-  const [projEdit, setProjEdit] = React.useState<ProjectEditState | null>(null);
-  const [projConfirm, setProjConfirm] = React.useState<ProjectEditState | null>(null);
+  const [projEdit, setProjEdit] = React.useState<ProjectFileEditState | null>(null);
+  const [projResidentEdit, setProjResidentEdit] = React.useState<ProjectResidentEditState | null>(null);
+  const [projCreate, setProjCreate] = React.useState<ProjectCreateState | null>(null);
+  const [projConfirm, setProjConfirm] = React.useState<{ project: string; file: string } | null>(null);
+  const [newProjectPath, setNewProjectPath] = React.useState('');
   const [standingEdit, setStandingEdit] = React.useState<StandingEditState | null>(null);
   const [newStanding, setNewStanding] = React.useState('');
   const [open, setOpen] = React.useState<Record<string, boolean>>({ standing: true, files: true, indexes: true, projects: false, backups: true, config: false });
@@ -293,7 +332,10 @@ function MemAdminPage(): React.ReactElement {
       setEditing(null);
       setConfirmDel(null);
       setProjEdit(null);
+      setProjResidentEdit(null);
+      setProjCreate(null);
       setProjConfirm(null);
+      setNewProjectPath('');
       setStandingEdit(null);
       setNewStanding('');
       setConfirmRestore(false);
@@ -447,73 +489,180 @@ function MemAdminPage(): React.ReactElement {
     }),
   );
 
-  const projectRows = (): React.ReactNode => {
-    if (projects.length === 0) {
-      return React.createElement('div', { style: { fontSize: 13, color: 'var(--dsw-alias-label-secondary)', padding: '6px 0' } }, '（暂无项目记忆，会话在项目目录运行时会自动创建）');
+  /** Row for one `@memory/...` index entry. */
+  const projectEntryRow = (proj: ProjectInfo, entry: ProjectEntryInfo): React.ReactElement => {
+    const isConfirm = projConfirm && projConfirm.project === proj.name && projConfirm.file === entry.file;
+    if (isConfirm) {
+      return React.createElement('div', { key: proj.name + entry.file, style: { padding: '8px 0', borderBottom: '1px solid var(--dsw-alias-border-l1)', fontSize: 13 } },
+        React.createElement('div', { style: { color: 'var(--dsw-alias-state-warn-primary)', marginBottom: 6 } },
+          '确认删除 ' + entry.file + ' ？索引行会一并移除，文件移入 memory/.trash/（可恢复）'),
+        React.createElement('div', { style: { display: 'flex', gap: 8 } },
+          btn('删除', () => mutate('projectDelete', { project: proj.name, file: entry.file }), { style: { background: 'var(--dsw-alias-state-error-primary)', borderColor: 'transparent', color: '#fff' } }),
+          btn('取消', () => setProjConfirm(null)),
+        ),
+      );
     }
-    return projects.map((proj) => {
+    return React.createElement('div', { key: proj.name + entry.file, style: { padding: '6px 0', borderBottom: '1px solid var(--dsw-alias-border-l1)', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 } },
+      React.createElement('div', { style: { flex: 1, minWidth: 0 } },
+        React.createElement('div', { style: { fontSize: 13, lineHeight: 1.5, wordBreak: 'break-all' } },
+          '@' + entry.file + (entry.summary ? ' — ' + entry.summary : '')),
+        React.createElement('div', { style: { fontSize: 11, color: 'var(--dsw-alias-label-secondary)', marginTop: 2 } },
+          entry.exists ? entry.chars + ' 字符' : '文件缺失（索引仍在）'),
+      ),
+      React.createElement('div', { style: { display: 'flex', gap: 6, flexShrink: 0 } },
+        btn('编辑', () => openProjectFile(proj, entry.file), { style: { padding: '3px 8px', fontSize: 12 } }),
+        btn('删除', () => setProjConfirm({ project: proj.name, file: entry.file }), { style: { padding: '3px 8px', fontSize: 12 } }),
+      ),
+    );
+  };
+
+  /** Load one topic file into the editor. */
+  const openProjectFile = async (proj: ProjectInfo, file: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await api('/projectRead', { project: proj.name, file });
+      setProjEdit({ project: proj.name, file, summary: String(res.summary || ''), content: String(res.content || '') });
+      setProjResidentEdit(null);
+      setProjCreate(null);
+    } catch (e) {
+      setError(String((e && (e as Error).message) || e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const projectRows = (): React.ReactNode => {
+    const nodes: React.ReactNode[] = [];
+    if (projects.length === 0) {
+      nodes.push(React.createElement('div', { key: 'empty', style: { fontSize: 13, color: 'var(--dsw-alias-label-secondary)', padding: '6px 0' } },
+        '（暂无项目记忆。在项目目录跑一次会话，模型用 project_memory 写入后会自动登记；也可以在下方手动登记路径）'));
+    }
+    projects.forEach((proj) => {
       const isOpen = projOpen === proj.name;
-      const entries = proj.entryList || [];
-      return React.createElement('div', { key: proj.name, style: { borderBottom: '1px solid var(--dsw-alias-border-l1)' } },
+      const residentOver = proj.residentLimit > 0 && proj.residentChars > proj.residentLimit;
+      const residentEditing = projResidentEdit && projResidentEdit.project === proj.name;
+      const creating = projCreate && projCreate.project === proj.name;
+      const editingHere = projEdit && projEdit.project === proj.name;
+
+      nodes.push(React.createElement('div', { key: proj.name, style: { borderBottom: '1px solid var(--dsw-alias-border-l1)' } },
         React.createElement('div', {
           onClick: () => setProjOpen(isOpen ? null : proj.name),
           style: { display: 'flex', alignItems: 'center', gap: 8, padding: '9px 0', cursor: 'pointer', userSelect: 'none' },
         },
           React.createElement('span', { style: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)', transition: 'transform 0.2s', transform: isOpen ? 'rotate(90deg)' : 'none' } }, '\u25B8'),
-          React.createElement('span', { style: { fontSize: 13, fontWeight: 600, flex: 1 } }, proj.name),
-          React.createElement('span', { style: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)' } },
-            proj.exists ? proj.entries + ' 条 / ' + proj.chars + ' 字符' : '无文件'),
+          React.createElement('span', { style: { fontSize: 13, fontWeight: 600 } }, proj.name),
+          React.createElement('span', { style: { fontSize: 11, color: 'var(--dsw-alias-label-secondary)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, proj.root || ''),
+          React.createElement('span', { style: { fontSize: 12, color: residentOver ? 'var(--dsw-alias-state-warn-primary)' : 'var(--dsw-alias-label-secondary)' } },
+            proj.exists ? proj.entries.length + ' 个索引' : '无 AGENTS.md'),
         ),
         isOpen ? React.createElement('div', { style: { padding: '0 0 10px 20px' } },
-          entries.length === 0
-            ? React.createElement('div', { style: { fontSize: 13, color: 'var(--dsw-alias-label-secondary)', padding: '6px 0' } }, '（无条目）')
-            : entries.map((entry, i) => {
-                const isEditing = projEdit && projEdit.project === proj.name && projEdit.index === i;
-                const isConfirm = projConfirm && projConfirm.project === proj.name && projConfirm.index === i;
-                if (isEditing) {
-                  return React.createElement('div', { key: proj.name + i, style: { padding: '8px 0', borderBottom: '1px solid var(--dsw-alias-border-l1)' } },
-                    React.createElement(TextArea, { value: projEdit.text, onChange: (v) => setProjEdit({ project: proj.name, index: i, text: v }), placeholder: '条目内容' }),
-                    React.createElement('div', { style: { display: 'flex', gap: 8, marginTop: 6 } },
-                      btn('保存', () => mutate('projectUpdate', { project: proj.name, index: i, text: projEdit.text })),
-                      btn('取消', () => setProjEdit(null)),
-                    ),
-                  );
-                }
-                if (isConfirm) {
-                  return React.createElement('div', { key: proj.name + i, style: { padding: '8px 0', borderBottom: '1px solid var(--dsw-alias-border-l1)', fontSize: 13 } },
-                    React.createElement('div', { style: { color: 'var(--dsw-alias-state-warn-primary)', marginBottom: 6 } }, '确认删除这条? ' + String(entry.text || '').slice(0, 60)),
-                    React.createElement('div', { style: { display: 'flex', gap: 8 } },
-                      btn('删除', () => mutate('projectDelete', { project: proj.name, index: i }), { style: { background: 'var(--dsw-alias-state-error-primary)', borderColor: 'transparent', color: '#fff' } }),
-                      btn('取消', () => setProjConfirm(null)),
-                    ),
-                  );
-                }
-                return React.createElement('div', { key: proj.name + i, style: { padding: '6px 0', borderBottom: '1px solid var(--dsw-alias-border-l1)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 } },
-                  React.createElement('span', {
-                    style: {
-                      fontSize: 13,
-                      lineHeight: 1.5,
-                      flex: 1,
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      display: '-webkit-box',
-                      WebkitLineClamp: 2,
-                      WebkitBoxOrient: 'vertical',
-                    },
-                  }, String(entry.text || '')),
-                  React.createElement('div', { style: { display: 'flex', gap: 6, flexShrink: 0 } },
-                    btn('编辑', () => setProjEdit({ project: proj.name, index: i, text: String(entry.text || '') }), { style: { padding: '3px 8px', fontSize: 12 } }),
-                    btn('删除', () => setProjConfirm({ project: proj.name, index: i, text: String(entry.text || '') }), { style: { padding: '3px 8px', fontSize: 12 } }),
+          // ---- resident block
+          React.createElement('div', { style: { margin: '4px 0 10px' } },
+            React.createElement('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 12, fontWeight: 600, marginBottom: 4 } },
+              React.createElement('span', null, '常驻区（每次请求注入）'),
+              React.createElement('span', { style: { fontWeight: 400, color: residentOver ? 'var(--dsw-alias-state-warn-primary)' : 'var(--dsw-alias-label-secondary)' } },
+                proj.residentChars + ' / ' + proj.residentLimit + ' 字符'),
+            ),
+            residentOver ? meter(Math.min(100, Math.round((proj.residentChars / proj.residentLimit) * 100))) : null,
+            residentEditing
+              ? React.createElement('div', null,
+                  React.createElement(TextArea, { value: projResidentEdit.content, onChange: (v) => setProjResidentEdit({ project: proj.name, content: v }), placeholder: '每行一条常驻规则；细节请写进 memory/ 主题文件' }),
+                  React.createElement('div', { style: { display: 'flex', gap: 8, marginTop: 6 } },
+                    btn('保存', () => mutate('projectResident', { project: proj.name, content: projResidentEdit.content })),
+                    btn('取消', () => setProjResidentEdit(null)),
                   ),
-                );
-              }),
+                )
+              : React.createElement('div', null,
+                  proj.resident.length === 0
+                    ? React.createElement('div', { style: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)', padding: '4px 0' } }, '（无，索引即全部内容）')
+                    : React.createElement('div', { style: { fontSize: 12, lineHeight: 1.6, whiteSpace: 'pre-wrap', background: 'var(--dsw-alias-bg-layer-1)', borderRadius: 6, padding: '6px 8px', maxHeight: 180, overflow: 'auto' } }, proj.resident.join('\n')),
+                  React.createElement('div', { style: { marginTop: 4 } },
+                    btn('编辑常驻区', () => { setProjResidentEdit({ project: proj.name, content: proj.resident.join('\n') }); setProjEdit(null); setProjCreate(null); }, { style: { padding: '3px 8px', fontSize: 12 } }),
+                  ),
+                ),
+          ),
+          // ---- index
+          React.createElement('div', { style: { fontSize: 12, fontWeight: 600, margin: '8px 0 2px' } },
+            '记忆索引（' + proj.entries.length + ' 项 · ' + proj.indexChars + ' / ' + proj.indexLimit + ' 字符）'),
+          proj.entries.length === 0
+            ? React.createElement('div', { style: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)', padding: '4px 0' } }, '（无索引条目）')
+            : proj.entries.map((entry) => projectEntryRow(proj, entry)),
+          // ---- open file editor
+          editingHere
+            ? React.createElement('div', { style: { margin: '10px 0', padding: 8, border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 6 } },
+                React.createElement('div', { style: { fontSize: 12, fontWeight: 600, marginBottom: 4 } }, '编辑 @' + projEdit.file),
+                React.createElement('div', { style: { fontSize: 11, color: 'var(--dsw-alias-label-secondary)', marginBottom: 4 } }, '索引描述'),
+                React.createElement('input', {
+                  value: projEdit.summary,
+                  onChange: (e: React.ChangeEvent<HTMLInputElement>) => setProjEdit({ ...projEdit, summary: e.target.value }),
+                  placeholder: '一句话描述（写进 AGENTS.md 的 @ 行）',
+                  style: { width: '100%', boxSizing: 'border-box', fontSize: 12, padding: '4px 6px', marginBottom: 6, border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 4, background: 'var(--dsw-alias-bg-layer-1)', color: 'var(--dsw-alias-label-primary)' },
+                }),
+                React.createElement(TextArea, { value: projEdit.content, onChange: (v) => setProjEdit({ ...projEdit, content: v }), placeholder: '记忆文件内容（Markdown）' }),
+                React.createElement('div', { style: { display: 'flex', gap: 8, marginTop: 6 } },
+                  btn('保存', () => mutate('projectWrite', { project: proj.name, file: projEdit.file, summary: projEdit.summary, content: projEdit.content })),
+                  btn('取消', () => setProjEdit(null)),
+                ),
+              )
+            : null,
+          // ---- orphans
+          proj.orphans.length > 0
+            ? React.createElement('div', { style: { margin: '10px 0 0' } },
+                React.createElement('div', { style: { fontSize: 12, fontWeight: 600, color: 'var(--dsw-alias-state-warn-primary)', marginBottom: 2 } }, '未索引文件'),
+                proj.orphans.map((file) => React.createElement('div', { key: proj.name + file, style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 12, padding: '3px 0', gap: 8 } },
+                  React.createElement('span', { style: { flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' } }, file),
+                  React.createElement('div', { style: { display: 'flex', gap: 6, flexShrink: 0 } },
+                    btn('查看', () => openProjectFile(proj, file), { style: { padding: '2px 8px', fontSize: 11 } }),
+                    btn('删除', () => setProjConfirm({ project: proj.name, file }), { style: { padding: '2px 8px', fontSize: 11 } }),
+                  ),
+                )),
+              )
+            : null,
+          // ---- create
+          creating
+            ? React.createElement('div', { style: { margin: '10px 0', padding: 8, border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 6 } },
+                React.createElement('input', {
+                  value: projCreate.file,
+                  onChange: (e: React.ChangeEvent<HTMLInputElement>) => setProjCreate({ ...projCreate, file: e.target.value }),
+                  placeholder: 'memory/新主题.md',
+                  style: { width: '100%', boxSizing: 'border-box', fontSize: 12, padding: '4px 6px', marginBottom: 6, border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 4, background: 'var(--dsw-alias-bg-layer-1)', color: 'var(--dsw-alias-label-primary)' },
+                }),
+                React.createElement('input', {
+                  value: projCreate.summary,
+                  onChange: (e: React.ChangeEvent<HTMLInputElement>) => setProjCreate({ ...projCreate, summary: e.target.value }),
+                  placeholder: '一句话描述',
+                  style: { width: '100%', boxSizing: 'border-box', fontSize: 12, padding: '4px 6px', marginBottom: 6, border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 4, background: 'var(--dsw-alias-bg-layer-1)', color: 'var(--dsw-alias-label-primary)' },
+                }),
+                React.createElement(TextArea, { value: projCreate.content, onChange: (v) => setProjCreate({ ...projCreate, content: v }), placeholder: '文件内容（Markdown）' }),
+                React.createElement('div', { style: { display: 'flex', gap: 8, marginTop: 6 } },
+                  btn('创建', () => mutate('projectCreate', { project: proj.name, file: projCreate.file, summary: projCreate.summary, content: projCreate.content })),
+                  btn('取消', () => setProjCreate(null)),
+                ),
+              )
+            : React.createElement('div', { style: { display: 'flex', gap: 8, marginTop: 10 } },
+                btn('+ 新建记忆文件', () => { setProjCreate({ project: proj.name, file: 'memory/', summary: '', content: '' }); setProjEdit(null); setProjResidentEdit(null); }, { style: { padding: '3px 10px', fontSize: 12 } }),
+                btn('迁移旧 AGENTS.md', () => mutate('projectMigrate', { project: proj.name, apply: true }), { style: { padding: '3px 10px', fontSize: 12 } }),
+              ),
         ) : null,
-      );
+      ));
     });
+    // ---- manual registration
+    nodes.push(React.createElement('div', { key: 'register', style: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 10 } },
+      React.createElement('input', {
+        value: newProjectPath,
+        onChange: (e: React.ChangeEvent<HTMLInputElement>) => setNewProjectPath(e.target.value),
+        placeholder: '登记项目：/绝对/仓库路径',
+        style: { flex: 1, fontSize: 12, padding: '4px 6px', border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 4, background: 'var(--dsw-alias-bg-layer-1)', color: 'var(--dsw-alias-label-primary)' },
+      }),
+      btn('登记', () => mutate('projectRegister', { root: newProjectPath }), { style: { padding: '3px 10px', fontSize: 12 } }),
+    ));
+    return nodes;
   };
 
   const projectsBody = (): React.ReactElement => React.createElement('div', null,
-    React.createElement('div', { style: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)', padding: '6px 0' } }, '按会话工作目录自动归属项目；文件与 Pi 的 projects-memory 兼容共享'),
+    React.createElement('div', { style: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)', padding: '6px 0' } },
+      '项目根目录的 AGENTS.md = 常驻区 + @memory/ 索引；记忆正文在 memory/ 下按主题分文件，按需读取。点索引行的「编辑」编辑该文件全文。'),
     React.createElement('div', { style: { marginTop: 4 } }, projectRows()),
   );
 

@@ -1,19 +1,21 @@
 /**
- * Project memory — ported in spirit from pi-hermes-memory's project.ts.
+ * Git project-root detection.
  *
- * A "project" is any working directory that is not the user's home. Inside a
- * Git repository the project name is the REPOSITORY ROOT's basename, so every
- * linked worktree shares one identity; outside Git it stays the cwd basename.
- * An existing `projects-memory/<cwd-basename>/` store still wins over a newly
- * derived repository name (migration bridge).
+ * A "project" is a Git repository root, so every linked worktree shares one
+ * identity (and therefore one AGENTS.md + memory/ directory). Detection is
+ * pure filesystem probing — no `git` subprocess — because it runs on the
+ * request path.
  *
- * The projects root is Pi-compatible: when the memory dir IS the Pi hermes
- * data dir (`~/.pi/agent/pi-hermes-memory`), the projects root resolves to
- * `~/.pi/agent/projects-memory` so DSH and Pi share the same per-project
- * stores. Otherwise it is `<memoryDir>/projects-memory`.
+ * Linked worktrees are the interesting case: their `.git` is a *file* holding
+ * a `gitdir:` pointer to `<main>/.git/worktrees/<name>`, plus a `commondir`
+ * file (or the conventional parent layout, for older Git). Both spellings are
+ * followed back to the main repository root.
+ *
+ * Project memory itself (the AGENTS.md index and memory/ files) lives in
+ * lib/project-memory.ts; this module only answers "which directory is the
+ * project root".
  */
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 
 const repoRootCache = new Map<string, string | null>();
@@ -63,61 +65,4 @@ function resolveWorktreeCommonDir(worktreeRoot: string, dotGitFile: string): str
   }
   const parent = path.dirname(gitDir);
   return path.basename(parent) === 'worktrees' ? path.dirname(parent) : null;
-}
-
-/**
- * Pi-compatible projects root.
- */
-export function resolveProjectsRoot(memoryDir: string): string {
-  const home = os.homedir();
-  const piHermesDir = path.join(home, '.pi', 'agent', 'pi-hermes-memory');
-  if (path.resolve(memoryDir) === path.resolve(piHermesDir)) {
-    return path.join(home, '.pi', 'agent', 'projects-memory');
-  }
-  return path.join(memoryDir, 'projects-memory');
-}
-
-/**
- * Detect the project for a working directory.
- */
-export function detectProject(cwd: string, projectsRoot: string): { name: string | null; memoryDir: string | null } {
-  const resolved = path.resolve(cwd);
-  const resolvedHome = path.resolve(os.homedir());
-  if (resolved === resolvedHome || resolved === path.parse(resolved).root) {
-    return { name: null, memoryDir: null };
-  }
-  const cwdName = path.basename(resolved);
-  if (!cwdName || cwdName === '.' || cwdName === '..') {
-    return { name: null, memoryDir: null };
-  }
-  const name = resolveProjectName(resolved, resolvedHome, cwdName, projectsRoot);
-  return { name, memoryDir: path.join(projectsRoot, name) };
-}
-
-function resolveProjectName(resolved: string, resolvedHome: string, cwdName: string, projectsRoot: string): string {
-  let repoRoot = repoRootCache.get(resolved);
-  if (repoRoot === undefined) {
-    repoRoot = findGitRepoRoot(resolved);
-    repoRootCache.set(resolved, repoRoot);
-  }
-  if (!repoRoot || repoRoot === resolved || repoRoot === resolvedHome) return cwdName;
-  const repoName = path.basename(repoRoot);
-  if (!repoName || repoName === cwdName) return cwdName;
-  // Migration bridge: keep an identity that already has a store.
-  if (!fs.existsSync(path.join(projectsRoot, repoName)) && fs.existsSync(path.join(projectsRoot, cwdName))) {
-    return cwdName;
-  }
-  return repoName;
-}
-
-/**
- * Validate a model-supplied project name for the tools (path traversal guard).
- * @returns sanitized name, or null when unsafe
- */
-export function safeProjectName(name: unknown): string | null {
-  if (typeof name !== 'string') return null;
-  const trimmed = name.trim();
-  if (!trimmed || trimmed.length > 80) return null;
-  if (/[\\/]|\.\./.test(trimmed)) return null;
-  return trimmed;
 }
