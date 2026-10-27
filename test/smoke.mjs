@@ -370,6 +370,40 @@ check('scan with maxDepth 0 finds nothing', scanAndRegister(scanMem, scanBase, {
 const scanDeep = scanAndRegister(scanMem, scanBase, { maxDepth: 1 });
 check('scan honours maxDepth', scanDeep.roots.length === 1 && scanDeep.roots[0].endsWith('one'), JSON.stringify(scanDeep.roots));
 
+// 12b-3. plans that fake heading preservation must be rejected
+import { validatePlan as vp } from '../dist/lib/project-migrate.js';
+const longOriginal = [
+  '# 项目说明', '',
+  '## 构建', 'npm run build', '',
+  '## 部署', 'systemctl restart app', '',
+  '## 排障', 'check the logs first, then restart', '',
+  '## 约定', 'never edit generated files by hand', '',
+].join('\n');
+const dumpPlan = parsePlan(JSON.stringify({
+  resident: ['## 构建', '## 部署'],
+  files: [{ file: 'memory/all.md', summary: 'x', content: longOriginal }],
+}));
+check('a plan that dumps the whole original into one file is rejected',
+  /整份原文|丢失/.test(vp(projRoot, longOriginal, dumpPlan, { scan: true }) || ''),
+  vp(projRoot, longOriginal, dumpPlan, { scan: true }));
+const emptyResident = parsePlan(JSON.stringify({
+  resident: [],
+  files: [
+    { file: 'memory/a.md', summary: 'x', content: '# 项目说明\n\n## 构建\nnpm run build\n' },
+    { file: 'memory/b.md', summary: 'x', content: '## 部署\nsystemctl restart app\n' },
+    { file: 'memory/c.md', summary: 'x', content: '## 排障\ncheck logs\n\n## 约定\nnever edit\n' },
+  ],
+}));
+check('a plan with an empty resident block is rejected',
+  /常驻区为空/.test(vp(projRoot, longOriginal, emptyResident, { scan: true }) || ''));
+const shrunk = parsePlan(JSON.stringify({
+  resident: ['# 项目说明', '- 构建', '- 部署', '- 排障', '- 约定'],
+  files: [],
+}));
+check('a plan whose output is much shorter than the original is rejected',
+  /明显短于原文/.test(vp(projRoot, longOriginal, shrunk, { scan: true }) || ''),
+  vp(projRoot, longOriginal, shrunk, { scan: true }));
+
 // 12c. migration planner validation
 import { parsePlan, validatePlan, headingsOf } from '../dist/lib/project-migrate.js';
 const original = '# 规则\n\n## 构建\nnpm run build\n\n## 部署\nsystemctl restart app\n';

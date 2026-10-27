@@ -26,6 +26,8 @@ import {
   readIndex,
   writeAgents,
   writeMemoryFile,
+  readMemoryFile,
+  listMemoryFiles,
   safeMemoryRel,
   residentChars,
   type AgentsBudget,
@@ -194,11 +196,44 @@ export function validatePlan(root: string, original: string, plan: MigrationPlan
     if (blocked) return `常驻区未通过内容扫描：${blocked}`;
   }
 
-  // Heading preservation: every heading in the original must survive.
-  const haystack = [plan.resident.join('\n'), ...plan.files.map((f) => f.content)].join('\n');
-  const missing = headingsOf(original).filter((heading) => !haystack.includes(heading));
+  // Heading preservation, checked STRUCTURALLY. Substring matching was not
+  // enough: a plan that dumps the whole original document into one topic file
+  // makes every heading "present" while the resident rules vanish. A heading
+  // only counts when it appears as an actual heading line in exactly the place
+  // it now lives.
+  const residentText = plan.resident.join('\n');
+  const fileText = plan.files.map((f) => f.content).join('\n');
+  const producedSet = new Set(headingsOf(`${residentText}\n${fileText}`));
+  // A heading may legitimately be folded into a resident rule or a bullet
+  // (`## 构建` -> `- 构建：npm run build`). Accept either a real heading line or
+  // a line that mentions it, but only when the mention carries real content.
+  const missing = headingsOf(original).filter((heading) => {
+    if (producedSet.has(heading)) return false;
+    const asLine = new RegExp(`^\\s*(?:[-*+]\\s+|\\d+\\.\\s+)?${escapeRegExp(heading)}`, 'm');
+    return !(asLine.test(residentText) || asLine.test(fileText));
+  });
   if (missing.length > 0) {
     return `迁移会丢失 ${missing.length} 个标题：${missing.slice(0, 5).map((h) => `「${h}」`).join('、')}`;
+  }
+  // A topic file that reproduces the original verbatim means the plan did not
+  // actually split anything — the resident rules would be demoted to lazy text.
+  const body = [plan.resident.join('\n'), ...plan.files.map((f) => f.content)].join('\n');
+  const originalHeadings = headingsOf(original).length;
+  if (plan.resident.length === 0 && originalHeadings > 0) {
+    return '迁移计划的常驻区为空，原文的规则会被整体降级为懒加载内容';
+  }
+  const trimmedOriginal = original.trim();
+  for (const file of plan.files) {
+    // Verbatim copy, or a single topic file carrying nearly all of the original
+    // body, means the plan did not split anything — the "headings are present"
+    // check would otherwise pass while the resident rules were demoted to a
+    // lazily-loaded file.
+    const carriesAll = file.content.includes(trimmedOriginal)
+      || (trimmedOriginal.length > 0 && file.content.length >= trimmedOriginal.length * 0.9 && plan.files.length === 1);
+    if (carriesAll) return `${file.file} 原样包含了几乎整份原文，说明没有真正拆分`;
+  }
+  if (body.length < original.length * 0.8) {
+    return `迁移结果明显短于原文（${body.length} < ${Math.round(original.length * 0.8)} 字符），可能丢失内容`;
   }
   return null;
 }
@@ -281,15 +316,39 @@ export async function migrateAgents(
   // may answer `memory/x.md`, `x.md` or `./memory/x.md` for the same file.
   const planned = plan.files
     .map((f) => ({ file: safeMemoryRel(root, f.file) ?? f.file, summary: f.summary, exists: true, chars: f.content.length }));
-  // Belt and braces: keep any pre-existing entry the plan did not mention, so a
-  // re-run can never silently unindex a topic file that is still on disk.
   const plannedFiles = new Set(planned.map((e) => e.file));
+  // Keep pre-existing entries the plan did not mention, so a run can never
+  // silently unindex a topic file that is still on disk...
   const survivors = readIndex(root).entries.filter((e) => !plannedFiles.has(e.file));
-  const entries = [...planned, ...survivors];
+  // ...and adopt files already in memory/ that were never indexed (a repo can
+  // follow the convention by hand before this plugin ever runs).
+  const adopted: Array<{ file: string; summary: string; exists: true; chars: number }> = [];
+  for (const rel of listMemoryFiles(root)) {
+    if (plannedFiles.has(rel)) continue;
+    if (survivors.some((e) => e.file === rel)) continue;
+    adopted.push({ file: rel, summary: firstHeadingOrName(root, rel), exists: true, chars: readMemoryFile(root, rel)?.length ?? 0 });
+  }
+  const entries = [...planned, ...survivors, ...adopted];
   const wrote = await writeAgents(root, plan.resident, entries, {
     residentCharLimit: opts.residentCharLimit,
     indexCharLimit: opts.indexCharLimit,
   });
   if (!wrote.ok) return { migrated: false, reason: wrote.error, plan };
   return { migrated: true, plan, written, backup };
+}
+
+/**
+ * First `# heading` of a topic file, used as its index summary when adopting a
+ * file the plan did not mention. Falls back to the file's basename.
+ */
+/** Escape a string for literal use inside a RegExp. */
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function firstHeadingOrName(root: string, rel: string): string {
+  const text = readMemoryFile(root, rel) ?? '';
+  const heading = /^#{1,6}\s+(.+)$/m.exec(text);
+  if (heading) return heading[1].trim().slice(0, 120);
+  return rel.replace(/^memory\//, '').replace(/\.md$/, '').replace(/[-_]/g, ' ');
 }

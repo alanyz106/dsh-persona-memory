@@ -42,7 +42,7 @@ import type { Context } from '@deepseek-ai/cordis';
 export const name = 'dsh-persona-memory';
 
 /** Services required by this plugin (harness host plane). */
-export const inject = ['tools', 'systemPrompt', 'commands', 'webServer'];
+export const inject = ['tools', 'systemPrompt', 'commands', 'webServer', 'llm'];
 
 const PI_HERMES_DIR = path.join(os.homedir(), '.pi', 'agent', 'pi-hermes-memory');
 
