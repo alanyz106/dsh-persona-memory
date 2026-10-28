@@ -321,6 +321,8 @@ function MemAdminPage(): React.ReactElement {
   const [newProjectPath, setNewProjectPath] = React.useState('');
   /** parent directory to scan for repositories */
   const [scanPath, setScanPath] = React.useState('');
+  /** authoring guide panel (fetched once on first expand; host owns the text) */
+  const [guide, setGuide] = React.useState<{ open: boolean; text: string | null; loading: boolean }>({ open: false, text: null, loading: false });
   const [standingEdit, setStandingEdit] = React.useState<StandingEditState | null>(null);
   const [newStanding, setNewStanding] = React.useState('');
   const [open, setOpen] = React.useState<Record<string, boolean>>(initialUi.open);
@@ -610,6 +612,40 @@ function MemAdminPage(): React.ReactElement {
     }
   };
 
+  /**
+   * Toggle the authoring guide. The text lives on the host (lib/project-guide.ts)
+   * and is fetched once per page load, so the UI can never drift from what the
+   * model is actually told.
+   */
+  const toggleGuide = async () => {
+    if (guide.open) { setGuide({ ...guide, open: false }); return; }
+    // Already fetched once this page load: just re-open, no second round trip.
+    if (guide.text || guide.loading) { setGuide({ ...guide, open: true }); return; }
+    setGuide({ open: true, text: null, loading: true });
+    try {
+      const res = await api('/projectGuide', undefined, 'GET');
+      setGuide({ open: true, text: String(res.guide || ''), loading: false });
+    } catch (e) {
+      setGuide({ open: true, text: null, loading: false });
+      setError(String((e && (e as Error).message) || e));
+    }
+  };
+
+  const projectGuidePanel = (): React.ReactNode => React.createElement('div', { style: { margin: '6px 0 10px' } },
+    React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
+      btn(guide.open ? '收起写法指南' : '怎么看/怎么写项目记忆（AGENTS.md 两区划分）', toggleGuide, { style: { padding: '3px 10px', fontSize: 12 } }),
+      guide.text
+        ? btn('复制', () => {
+            try { void window.navigator.clipboard.writeText(guide.text || ''); } catch { /* clipboard blocked */ }
+          }, { style: { padding: '3px 10px', fontSize: 12 } })
+        : null,
+    ),
+    guide.open
+      ? React.createElement('div', { style: { marginTop: 6, fontSize: 12, lineHeight: 1.6, whiteSpace: 'pre-wrap', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', background: 'var(--dsw-alias-bg-layer-1)', borderRadius: 6, padding: '8px 10px', maxHeight: 420, overflow: 'auto' } },
+          guide.loading ? '读取中...' : (guide.text || '（读取失败，可刷新重试）'))
+      : null,
+  );
+
   const projectRows = (): React.ReactNode => {
     const nodes: React.ReactNode[] = [];
     if (projects.length === 0) {
@@ -793,6 +829,7 @@ function MemAdminPage(): React.ReactElement {
   const projectsBody = (): React.ReactElement => React.createElement('div', null,
     React.createElement('div', { style: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)', padding: '6px 0' } },
       '项目根目录的 AGENTS.md = 常驻区 + @memory/ 索引；记忆正文在 memory/ 下按主题分文件，按需读取。点索引行的「编辑」编辑该文件全文。'),
+    projectGuidePanel(),
     React.createElement('div', { style: { marginTop: 4 } }, projectRows()),
   );
 

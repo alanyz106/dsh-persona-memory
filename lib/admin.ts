@@ -43,6 +43,7 @@ import {
 } from './project-memory.js';
 import { listRegistered, rootForName, registerProject, scanAndRegister, type RegisteredProject } from './project-registry.js';
 import { migrateAgents } from './project-migrate.js';
+import { projectGuideText } from './project-guide.js';
 import { scanContent } from './secret-scanner.js';
 import type { LlmRoute } from './llm-helper.js';
 import type { VectorIndex } from './vector-index.js';
@@ -384,6 +385,7 @@ export const CFG_SCHEMA: SchemaField[] = [
   { key: 'projectResidentCharLimit', type: 'number', label: '常驻区预算', group: '项目', help: 'AGENTS.md 常驻区字符上限' },
   { key: 'projectIndexCharLimit', type: 'number', label: '索引区预算', group: '项目', help: '@memory/ 指针行总字符上限' },
   { key: 'projectAutoMigrate', type: 'bool', label: '自动迁移旧 AGENTS.md', group: '项目', help: '首次写入时用辅助 LLM 把 prose AGENTS.md 拆成常驻+索引' },
+  { key: 'projectBootstrapHint', type: 'bool', label: '新建项目记忆引导', group: '项目', help: '无记忆的 git 仓库里注入「怎么写项目记忆」的简短引导（否则新项目永远不知道该建）' },
   { key: 'memoryFtsEnabled', type: 'bool', label: 'FTS5 全文索引', group: '检索' },
   { key: 'vectorEnabled', type: 'bool', label: '向量搜索', group: '向量', help: 'FTS5+向量 RRF 混合检索' },
   { key: 'vectorIndexDir', type: 'string', label: '向量索引目录', group: '向量', help: '默认 $DSH_HOME/memory' },
@@ -410,7 +412,7 @@ export const CFG_DEFAULTS: Record<string, unknown> = {
   standingEnabled: true, standingCharLimit: 2000, standingMaxEntries: 20, failureInjectionEnabled: true,
   failureMaxAgeDays: 7, failureMaxEntries: 5, failureCharLimit: 10000,
   projectEnabled: true, projectFileCharLimit: 20000, projectResidentCharLimit: 3000,
-  projectIndexCharLimit: 4000, projectAutoMigrate: true,
+  projectIndexCharLimit: 4000, projectAutoMigrate: true, projectBootstrapHint: true,
   memoryFtsEnabled: true, vectorEnabled: false, embeddingProvider: 'remote', embeddingModel: 'text-embedding-3-small',
   embeddingRemoteHost: 'https://huggingface.co', adminProfile: 'web', adminAllowedHosts: '',
   autoBackupMin: 60, autoSwitchOnPiLoss: true,
@@ -936,6 +938,10 @@ export function makeAdminRoutes(deps: AdminRouteDeps): WebRoute[] {
       } catch (e) {
         writeJson(res, 500, { error: e instanceof Error ? e.message : String(e) });
       }
+    } },
+    { kind: 'exact', path: '/api/persona-memory/projectGuide', handler: async (req: IncomingMessage, res: ServerResponse) => {
+      if (!guard(req, res, 'GET')) return;
+      writeJson(res, 200, { guide: projectGuideText() });
     } },
     { kind: 'exact', path: '/api/persona-memory/checkModel', handler: async (req: IncomingMessage, res: ServerResponse) => {
       if (!guard(req, res, 'GET')) return;

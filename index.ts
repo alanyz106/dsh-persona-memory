@@ -29,6 +29,8 @@ import { registerMemoryTool, type MemoryToolConfig } from './lib/memory-tool.js'
 import { registerProjectMemoryTool } from './lib/project-memory-tool.js';
 import { type LlmRoute } from './lib/llm-helper.js';
 import { readIndex, resolveProjectRoot, type ProjectIndex } from './lib/project-memory.js';
+import { projectBootstrapBlock, projectCoreLines, projectHasMemory } from './lib/project-guide.js';
+import { findGitRepoRoot } from './lib/projects.js';
 import { registerProject } from './lib/project-registry.js';
 import { makeAdminRoutes, profilePatchPath, startAutoProtect } from './lib/admin.js';
 import { renderMemoryBlock } from './lib/prompt.js';
@@ -84,6 +86,8 @@ export interface PluginConfig {
   projectResidentCharLimit: number;
   projectIndexCharLimit: number;
   projectAutoMigrate: boolean;
+  /** Inject the "start a project memory" hint in repositories that have none. */
+  projectBootstrapHint: boolean;
   memoryFtsEnabled: boolean;
   vectorEnabled: boolean;
   vectorIndexDir: string;
@@ -173,23 +177,33 @@ function readIndexCached(root: string): ProjectIndex {
  * The project block injected into every request.
  *
  * The pointer lines themselves are NOT repeated here: `agent-instructions`
- * already injects AGENTS.md verbatim. This adds the convention (what the
- * pointers mean and how to load one), plus the pointer lines only when the
- * harness' discovery root differs from ours — which happens in a linked
- * worktree, where agent-instructions roots at the worktree while memory lives
- * at the main repository root.
+ * already injects AGENTS.md verbatim. This adds what the file cannot say about
+ * itself — what the two zones are for, how to load a topic, and how to write
+ * new knowledge — plus the pointer lines only when the harness' discovery
+ * root differs from ours (a linked worktree, where agent-instructions roots at
+ * the worktree while memory lives at the main repository root).
+ *
+ * Empty projects get the bootstrap variant instead: without it a fresh
+ * repository never learns that this protocol exists, which is precisely how
+ * project memory used to stay empty.
  */
 function renderProjectBlock(root: string, index: ProjectIndex, cwd: string): string {
+  if (!projectHasMemory(index)) return projectBootstrapBlock(root);
+  const core = projectCoreLines();
   const covered = harnessInstructionRoot(cwd) === root;
+  // Chinese on purpose: the guide (and the resident rules it competes with in
+  // a Chinese-language repository) is Chinese, and one block must not switch
+  // languages halfway through.
   if (covered) {
     // AGENTS.md is already in context (resident rules AND pointer lines), so
     // repeating the pointers would only burn tokens. Add the convention that
-    // the pointers are lazy: nothing here is loaded until the model reads it.
+    // the pointers are lazy (nothing here is loaded until the model reads it)
+    // and the authoring rules that keep the split intact as it grows.
     return [
-      '### Project memory',
-      'This repository keeps its long-term memory in `AGENTS.md` (loaded above): its non-pointer lines are always-on rules, and its `@memory/*.md` lines index topic files.',
-      'Those topic files are NOT in context — load one with `project_memory read` (or `read`) before working on that topic.',
-      'Record new durable project knowledge with `project_memory write` / `append`; the index line is maintained for you.',
+      '### 项目记忆',
+      '本仓库的长期记忆在 `AGENTS.md`（已在上方注入）：非 `@` 行是常驻规则，末尾的 `@memory/*.md` 行是主题文件索引。',
+      '主题文件不在上下文里——做那类工作前先用 `project_memory read`（或 `read`）读进来。',
+      ...core,
     ].join('\n');
   }
   // The harness did not load this AGENTS.md, so neither the pointers nor the
@@ -198,13 +212,14 @@ function renderProjectBlock(root: string, index: ProjectIndex, cwd: string): str
   // while the memory lives at the main repository root. Emit both here.
   const topics = index.entries.map((e) => `${e.file}${e.summary ? ` — ${e.summary}` : ''}`);
   const lines = [
-    '### Project memory',
-    `This repository keeps its long-term memory at \`${root}\` — but \`AGENTS.md\` there is not auto-loaded in this working directory, so it is reproduced here.`,
-    'Topic files are NOT in context; load one with `project_memory read` (or `read`) before working on that topic:',
+    '### 项目记忆',
+    `本仓库的长期记忆在 \`${root}\`，但当前工作目录下宿主的自动注入没带上它，所以这里补一份。`,
+    '主题文件不在上下文里，做那类工作前先用 `project_memory read`（或 `read`）读进来：',
     ...topics.map((t) => `- ${t}`),
+    ...core,
   ];
   const resident = index.resident.join('\n').trim();
-  if (resident) lines.push('', '#### Always-on rules (from AGENTS.md)', resident);
+  if (resident) lines.push('', '#### 常驻规则（来自 AGENTS.md）', resident);
   return lines.join('\n');
 }
 
@@ -274,6 +289,9 @@ export function apply(ctx: Context, config?: Record<string, unknown>): void {
     projectIndexCharLimit: 4000,
     // 已有 prose AGENTS.md 时是否允许辅助 LLM 自动改造成常驻+索引
     projectAutoMigrate: true,
+    // 无记忆的 git 仓库里是否注入「怎么建项目记忆」的引导（否则新项目永远
+    // 不知道有这套机制）
+    projectBootstrapHint: true,
     // FTS5 memory mirror (Extended Store): full-text ranking for memory_search
     memoryFtsEnabled: true,
     // Semantic (vector) memory search: a DSH-side SQLite cache storing ONLY
@@ -442,7 +460,20 @@ export function apply(ctx: Context, config?: Record<string, unknown>): void {
         const root = resolveProjectRoot(cwd);
         if (!root) return '';
         const index = readIndexCached(root);
-        if (!index.exists || index.entries.length === 0) return '';
+        // `exists` gates too: a `memory/` directory with no AGENTS.md has no
+        // resident rules and no index, so there is nothing to load yet.
+        const hasMemory = index.exists && projectHasMemory(index);
+        // Bootstrap only inside a real git repository: an arbitrary scratch
+        // directory has no shared memory to grow, and telling the model to
+        // start one there would just produce files nobody reads again.
+        if (!hasMemory) {
+          if (!cfg.projectBootstrapHint) return '';
+          if (findGitRepoRoot(cwd) === null) return '';
+          // Do NOT register here: the registry lists projects that HAVE
+          // memory, and merely opening a repository is not a reason to fill
+          // the admin page with rows pointing at nothing.
+          return renderProjectBlock(root, index, cwd);
+        }
         registerProject(memoryDir, root);
         return renderProjectBlock(root, index, cwd);
       });

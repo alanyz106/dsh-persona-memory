@@ -28,7 +28,8 @@
 | 功能 | 说明 |
 |---|---|
 | `memory` 工具 | `read` / `add` / `update` / `delete` / `rewrite`；`which` 选 memory/user/failure（全局记忆） |
-| `project_memory` 工具 | `list` / `read` / `write` / `append` / `delete` / `search` / `add_resident` / `remove_resident` / `migrate`；作用域固定为当前会话的项目，无 project 参数（防任意路径写） |
+| `project_memory` 工具 | `list` / `read` / `write` / `append` / `delete` / `search` / `add_resident` / `remove_resident` / `migrate` / `guide`；作用域固定为当前会话的项目，无 project 参数（防任意路径写） |
+| 写法指南内置 | 每请求注入 4 条「两区划分 + 何时读/写」要点（约 330 字符）；完整写法指南（分区判据、流程、真实 AGENTS.md 示例、反模式）经 `project_memory guide` 按需取，管理页也能看 |
 | `memory_search`（混合检索，全局记忆） | 优先 **FTS5 + 语义向量（RRF 融合）**：FTS5 全文索引（`<dir>/.memory-index.sqlite`，mtime 自动重建）+ 向量索引（`vectorIndexDir` 下 `.memory-vec.sqlite`，只存 embedding、指纹增量同步、纯 JS 余弦）；向量未启用时走 FTS5，SQLite 不可用时回退子串扫描；结果始终 ≤`searchMaxResults` 条、只进工具输出，注入成本不随检索方式增加 |
 | 用量提示 | 所有 `memory` 操作返回用量百分比；达 90%（`usageNudgeThreshold`）提醒用 `rewrite` 合并 |
 | `/standing` 命令 | 用户管理常驻指令（列出 / add / remove / clear） |
@@ -60,7 +61,7 @@
 | 字节格式稳定性 | 无尾随换行、charCount 含分隔符、USER 上限 5000、超限拒绝写入、注入 `<memory-context>` 围栏 |
 | 路径安全闸门 | 项目记忆的每个路径（工具参数、管理页 body、迁移产物）都过 `safeMemoryRel`：必须 `memory/**.md`、无 `..`、无绝对路径、无 dotfile、resolve 后仍在 `memory/` 内（含符号链接逃逸检查） |
 | 优雅降级 | FTS5 不可用回退子串搜索；SQLite 动态 import，插件绝不硬依赖 |
-| 226 项冒烟测试 | 验证存储格式、解析、读写、扫描、合并、项目根探测、索引解析、路径安全、迁移校验、备份恢复、纠正、FTS、向量索引、溢出拒绝、并发全链路 |
+| 275 项冒烟测试 | 验证存储格式、解析、读写、扫描、合并、项目根探测、索引解析、路径安全、迁移校验、备份恢复、纠正、FTS、向量索引、溢出拒绝、并发全链路 |
 ---
 
 ## 借鉴来源（明确声明）
@@ -114,7 +115,7 @@
 |---|---|
 | `memory` | 全局记忆：`read` / `add` / `update` / `delete` / `rewrite`，`which` 选 `memory` / `user` / `failure`；failure 支持 `category` / `failure_reason` / `corrected_to` |
 | `memory_search` | 全局记忆检索：`query` + 可选 `which`（`memory`/`user`/`failure`/`all`） |
-| `project_memory` | 项目记忆：`list` / `read` / `write` / `append` / `delete` / `search` / `add_resident` / `remove_resident` / `migrate`；作用域为当前项目 |
+| `project_memory` | 项目记忆：`list` / `read` / `write` / `append` / `delete` / `search` / `add_resident` / `remove_resident` / `migrate` / `guide`；作用域为当前项目 |
 | `/standing` | 列出常驻指令 |
 | `/standing add <文本>` | 钉住一条常驻指令 |
 | `/standing remove <n>` | 按 1 起编号移除 |
@@ -203,6 +204,7 @@ file: 安装是真实副本——改代码后须重新构建、`dsh plugin --pro
 | `projectResidentCharLimit` | `3000` | `AGENTS.md` 常驻区字符预算（每次请求都注入，只放操作性硬约束） |
 | `projectIndexCharLimit` | `4000` | `AGENTS.md` 索引区（`@memory/...` 行）字符预算 |
 | `projectAutoMigrate` | `true` | 首次写入遇到 prose `AGENTS.md` 时，是否允许辅助 LLM 自动拆成常驻 + 索引 |
+| `projectBootstrapHint` | `true` | 无记忆的 git 仓库里注入「怎么建项目记忆」的引导（约 330 字符）；关掉后新项目不再收到提示 |
 
 `dir` 默认解析顺序：① 显式 `config.dir` → ② `~/.pi/agent/pi-hermes-memory`（若已存在 `MEMORY.md`，即与 Pi 共用）→ ③ `$DSH_HOME/memory`（默认 `~/.dsh/memory`）。
 
@@ -288,7 +290,16 @@ file: 安装是真实副本——改代码后须重新构建、`dsh plugin --pro
 
 ### 工具：`project_memory`
 
-作用域固定为当前会话的项目（**没有 `project` 参数**——能任意指名项目就能任意写路径）。`list` / `read` / `write` / `append` / `delete` / `search` / `add_resident` / `remove_resident` / `migrate`。写入自动维护索引行：新建文件补一行，改描述更新该行，删除文件同时移除指针并把文件移进 `memory/.trash/`。
+作用域固定为当前会话的项目（**没有 `project` 参数**——能任意指名项目就能任意写路径）。`list` / `read` / `write` / `append` / `delete` / `search` / `add_resident` / `remove_resident` / `migrate` / `guide`。写入自动维护索引行：新建文件补一行，改描述更新该行，删除文件同时移除指针并把文件移进 `memory/.trash/`。
+
+### 写法指南（内置 prompt）
+
+机制本身不教模型**该怎么写**——只给工具，模型会把散文塞进常驻区，或者把所有内容塞进一个 `memory/all.md`。所以指南是插件的一部分（`lib/project-guide.ts`，单一真源，两种尺寸）：
+
+- **每请求注入（约 330 字符）**：两区定义 + 记账前先 `list` 看同主题 + 细节进主题文件 + 跨项目偏好走全局 `memory`。
+- **空仓库引导（`projectBootstrapHint`）**：无 `AGENTS.md` 的 git 仓库里补一句「本仓库还没有项目记忆」+ 上面四条要点，否则新项目永远不知道这套机制存在。
+- **完整指南（`project_memory guide`，约 3300 字符，不常驻）**：常驻区该放什么（构建/测试命令与判定标准、禁改清单、必守约定、部署约束、环境怪癖）不该放什么；检索区主题怎么分（踩坑日志、架构、业务流程、SOP、历史决策）与命名/预算；三区边界表（全局 `memory` / 项目记忆 / `/standing`）与三条判据；创建与升级流程；一份真实 `AGENTS.md` 示例；反模式清单（整份 README 粘进常驻区、索引写「杂项」、什么都塞 `all.md`、写凭据）。
+- 管理页「项目记忆」卡顶部有同一份指南的展开面板（走 `/api/persona-memory/projectGuide`），保证人和模型看到的是同一段文字。
 
 ### 迁移已有 AGENTS.md
 

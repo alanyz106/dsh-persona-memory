@@ -596,6 +596,43 @@ const blockedWrite = await projTool.execute(
 ).catch((e) => e);
 check('project_memory rejects secrets', blockedWrite instanceof Error);
 
+// 15c. authoring guide: one source of truth for both the injected essentials
+// and the on-demand full text.
+import { projectGuideText, projectCoreLines, projectBootstrapBlock } from '../dist/lib/project-guide.js';
+const guideText = projectGuideText();
+const coreLines = projectCoreLines();
+check('guide is substantial', guideText.length > 1500, `chars=${guideText.length}`);
+check('guide opens with the core recap', coreLines.every((line) => guideText.includes(line)));
+check('core lines stay small (injected every request)', coreLines.join('\n').length < 900, `chars=${coreLines.join('\n').length}`);
+check('guide explains both zones', /常驻区/.test(guideText) && /检索区/.test(guideText));
+check('guide names the real tool actions', ['project_memory list', 'append', 'add_resident', 'migrate'].every((t) => guideText.includes(t)));
+check('guide lists anti-patterns', /不要这样做/.test(guideText));
+check('guide mentions the credentials rule', /凭据|token|私钥/.test(guideText));
+check('bootstrap block names the root and the tool',
+  projectBootstrapBlock('/tmp/x').includes('/tmp/x') && projectBootstrapBlock('/tmp/x').includes('project_memory'));
+
+// The guide action must not enroll the repository: a lookup is not a memory.
+const guideRoot = fs.mkdtempSync(path.join(testDir, 'guiderepo-'));
+fs.mkdirSync(path.join(guideRoot, '.git'));
+const guideRegistry = fs.mkdtempSync(path.join(testDir, 'guideregistry-'));
+let guideTool;
+registerProjectMemoryTool({ tools: { register: (t) => { guideTool = t; } }, logger: { warn: () => {}, info: () => {} } }, {
+  config: {
+    projectFileCharLimit: 20000, projectResidentCharLimit: 3000, projectIndexCharLimit: 4000,
+    projectAutoMigrate: false, enableSecretScanning: true, searchMaxResults: 10, memoryDir: guideRegistry,
+  },
+  cwdOf: () => guideRoot,
+});
+const guideResult = await guideTool.execute({ action: 'guide' }, { agent: undefined });
+check('project_memory guide returns the full text', guideResult.guide === guideText);
+check('the guide renderer emits prose, not JSON', guideTool.output.render({ action: 'guide' }, guideResult)[0].text.startsWith('# 项目记忆写法'));
+check('project_memory guide does not register the project', listRegistered(guideRegistry).length === 0);
+const guideNoCwd = await guideTool.execute({ action: 'guide' }, { agent: undefined });
+check('project_memory guide works without a project cwd', guideNoCwd.guide === guideText);
+const listRender = guideTool.output.render({ action: 'list' }, { entries: [] });
+check('other actions still render JSON', listRender[0].text.startsWith('```json'));
+
+// 16. concurrent adds never clobber (single-lock read-modify-write)
 // 16. concurrent adds never clobber (single-lock read-modify-write)
 const concStore = createMemoryStore({ dir: path.join(testDir, 'conc') });
 const [ca, cb] = await Promise.all([
@@ -835,7 +872,7 @@ const routes = makeAdminRoutes({
   profilePatch: path.join(testDir, 'cordis.patch.yml'),
   log: () => {},
 });
-check('admin exposes the project route family', ['projectRead', 'projectWrite', 'projectCreate', 'projectDelete', 'projectResident', 'projectMigrate', 'projectRegister']
+check('admin exposes the project route family', ['projectRead', 'projectWrite', 'projectCreate', 'projectDelete', 'projectResident', 'projectMigrate', 'projectRegister', 'projectGuide']
   .every((name) => routes.some((r) => r.path === `/api/persona-memory/${name}`)));
 
 // 25b. a refused migration reports its reason (not a bare HTTP error)
@@ -1017,6 +1054,46 @@ check('migration skips an already-canonical file', migNoop.migrated === false &&
   check('the reloaded plugin serves the same route count', second.routes.size === firstMount,
     `routes=${second.routes.size}`);
   for (const dispose of second.effects.reverse()) if (typeof dispose === 'function') dispose();
+}
+
+// 27. the injected project block: a repository with no memory gets the
+// bootstrap hint (previously the section was empty, so a fresh repo never
+// learned this protocol existed), and one WITH memory gets the core rules.
+{
+  const { apply } = await import('../dist/index.js');
+  const noop = () => () => {};
+  const vars = {};
+  const makeCtx = () => ({
+    logger: { info: noop(), warn: noop(), error: noop() },
+    get: () => undefined,
+    on: () => noop(),
+    effect(body) { body(); return noop(); },
+    tools: { register: noop },
+    commands: { register: noop },
+    systemPrompt: { variable: (name, fn) => { vars[name] = fn; }, section: noop },
+  });
+  const render = (cwd) => vars.project_block({ agent: { session: { header: { cwd } } } });
+
+  const bootRoot = fs.mkdtempSync(path.join(testDir, 'boot-'));
+  fs.mkdirSync(path.join(bootRoot, '.git'));
+  const bootRegistry = fs.mkdtempSync(path.join(testDir, 'bootreg-'));
+  apply(makeCtx(), {
+    dir: bootRegistry, autoBackupMin: 0, standingEnabled: false, learnEnabled: false,
+    vectorEnabled: false, memoryFtsEnabled: false, projectEnabled: true,
+  });
+  const emptyBlock = render(bootRoot);
+  check('an empty git repo gets the bootstrap hint', /还没有项目记忆/.test(emptyBlock), emptyBlock.slice(0, 80));
+  check('the bootstrap hint names the two zones', /常驻区/.test(emptyBlock) && /@memory\//.test(emptyBlock));
+  check('bootstrapping does not register the project', listRegistered(bootRegistry).length === 0);
+  check('a plain directory gets no project block', render(path.join(testDir, 'norepo-does-not-exist')) === '');
+
+  // now give it memory: the bootstrap hint is replaced by the core rules
+  fs.writeFileSync(path.join(bootRoot, 'AGENTS.md'), '- 构建：npm run build\n\n@memory/build.md — 构建\n');
+  const filledBlock = render(bootRoot);
+  check('a project with memory gets the resident/index convention', /已在上方注入/.test(filledBlock), filledBlock.slice(0, 80));
+  check('the filled block carries the authoring essentials', /常驻区/.test(filledBlock) && /project_memory guide/.test(filledBlock));
+  check('the filled block no longer bootstraps', !/还没有项目记忆/.test(filledBlock));
+  check('reading a populated project registers it', listRegistered(bootRegistry).length === 1);
 }
 
 // cleanup

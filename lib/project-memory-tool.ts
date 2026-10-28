@@ -16,6 +16,7 @@ import { defineTool, type ToolRunContext } from '@deepseek-ai/dsh-tools';
 import { scanContent } from './secret-scanner.js';
 import { latestRoute, type LlmRoute } from './llm-helper.js';
 import { migrateAgents } from './project-migrate.js';
+import { projectGuideText } from './project-guide.js';
 import { registerProject } from './project-registry.js';
 import {
   readIndex,
@@ -142,22 +143,23 @@ export function registerProjectMemoryTool(ctx: Context, deps: ProjectMemoryDeps)
     defineTool({
       name: 'project_memory',
       description:
-        'Manage THIS repository\'s long-term memory. The project keeps two things at its root: '
-        + '`AGENTS.md` (always loaded into context — its non-pointer lines are resident rules, and its `@memory/*.md` lines are the index) '
-        + 'and a `memory/` directory of one-topic-per-file notes that are NOT loaded until read. '
+        'Manage THIS repository\'s long-term memory. It has two zones: '
+        + '`AGENTS.md` (always loaded into context — its non-pointer lines are the resident zone of hard, must-not-break rules; '
+        + 'its `@memory/*.md` lines index topic files) and a `memory/` directory of one-topic-per-file notes that are NOT loaded until read. '
         + 'Use this instead of the global `memory` tool for anything specific to this codebase: architecture, build/deploy steps, '
         + 'gotchas, decisions, environment quirks. '
-        + 'Actions: list (index + orphans), read (load one topic file), write (create/replace a topic file and index it), '
+        + 'Actions: list (index + orphans + budget usage), read (load one topic file), write (create/replace a topic file and index it), '
         + 'append (add a section to a topic file), delete (remove a pointer and trash its file), '
         + 'search (substring search across topic files), add_resident / remove_resident (edit the always-on rules), '
-        + 'migrate (convert a prose AGENTS.md into this shape). '
+        + 'migrate (convert a prose AGENTS.md into this shape), guide (full authoring guide: what belongs in each zone, examples, anti-patterns). '
+        + 'Rule of thumb: what you must not get wrong goes resident; what you look up while doing the work goes in a topic file. '
         + 'Prefer several small topic files over one big one; never store credentials (writes are scanned).',
       parameters: {
         action: {
           type: 'string',
           required: true,
-          enum: ['list', 'read', 'write', 'append', 'delete', 'search', 'add_resident', 'remove_resident', 'migrate'],
-          description: 'What to do.',
+          enum: ['list', 'read', 'write', 'append', 'delete', 'search', 'add_resident', 'remove_resident', 'migrate', 'guide'],
+          description: 'What to do. `guide` takes no other argument.',
         },
         file: {
           type: 'string',
@@ -186,11 +188,25 @@ export function registerProjectMemoryTool(ctx: Context, deps: ProjectMemoryDeps)
       },
       output: {
         schema: { type: 'object', additionalProperties: true },
-        render(_args, value) {
+        render(rawArgs, value) {
+          // The guide is prose for the model to read, not a value to parse —
+          // JSON-wrapping it would only add escapes to every code fence.
+          if ((rawArgs as { action?: unknown } | null)?.action === 'guide') {
+            const guide = (value as { guide?: unknown }).guide;
+            return [{ type: 'text', text: typeof guide === 'string' ? guide : formatResult(value) }];
+          }
           return [{ type: 'text', text: formatResult(value) }];
         },
       },
       async execute(args, exec) {
+        // `guide` is pure documentation: it must work outside a project too
+        // (a session in the home directory still needs to know how to write
+        // memory), and it must not enroll the cwd in the registry — the admin
+        // page lists projects that keep memory, not projects that were asked
+        // about it.
+        if (args.action === 'guide') {
+          return { guide: projectGuideText() } as unknown as Record<string, JsonValue>;
+        }
         const { root, index } = projectFor(exec, deps);
         registerProject(cfg.memoryDir, root);
         const route = exec.agent?.session ? latestRoute(exec.agent.session) : undefined;
