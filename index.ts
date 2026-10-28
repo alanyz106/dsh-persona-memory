@@ -380,9 +380,18 @@ export function apply(ctx: Context, config?: Record<string, unknown>): void {
       profilePatch: profilePatchPath(profileName),
       log: (s) => ctx.logger.info(s),
     });
-    for (const route of routes) {
-      ctx.webServer.register(route);
-    }
+    // 注册必须挂在 effect 里：webServer.register 不像 tools.register /
+    // systemPrompt.section 那样自动绑定当前 fiber。不包 effect 时，插件被热重载
+    // （改 cordis.patch.yml、重装、HMR）后旧路由仍留在 webServer 表里，第二次
+    // apply 第一条就撞 `duplicate exact route` → 新 fiber FAILED（插件卡片显示
+    // "启动失败"），而旧路由继续服务（"记忆管理"页却照常能用），同时 memory
+    // 工具其实没注册上。
+    ctx.effect(() => {
+      const disposers = routes.map((route) => ctx.webServer.register(route));
+      return () => {
+        for (const dispose of disposers.reverse()) dispose();
+      };
+    });
 
     // 自动保护：定时备份（autoBackupMin 分钟一次，只保留最新一份）+ Pi
     // 记忆丢失自动切换（Pi 的 MEMORY.md 曾存在但消失 → 切到本地 + 恢复）。

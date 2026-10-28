@@ -965,6 +965,60 @@ fs.writeFileSync(path.join(migRoot3, 'AGENTS.md'), '@memory/a.md — 主题\n');
 const migNoop = await migrateAgents(migCtx, migRoot3, { provider: 'p', model: 'm' }, { plan: async () => migReply });
 check('migration skips an already-canonical file', migNoop.migrated === false && /无需迁移/.test(migNoop.reason || ''));
 
+// 26. admin routes are effect-scoped: a hot reload must not hit
+// `webserver: duplicate exact route`. The host's webServer.register throws on a
+// duplicate (kind, path) and, unlike ctx.tools.register, does NOT bind itself to
+// the current fiber — so the plugin must wrap the whole family in one
+// ctx.effect. Regression: 2026-10-28, the profile's HMR reload after a
+// remove+add left 19 routes behind, the second apply() threw on the first route,
+// the new fiber went FAILED ("启动失败") while the stale routes kept serving
+// ("记忆管理"页仍然可用) and the memory tools were never registered.
+{
+  const { apply } = await import('../dist/index.js');
+  const noop = () => () => {};
+  const makeCtx = (state) => ({
+    logger: { info: noop(), warn: noop(), error: noop() },
+    // the timer service is optional; returning undefined exercises the
+    // setInterval fallback without leaving a live timer behind
+    get: (key) => (key === 'timer' ? { interval: () => () => {} } : undefined),
+    on: () => noop(),
+    effect(body) { state.effects.push(body()); return noop(); },
+    tools: { register: noop },
+    commands: { register: noop },
+    systemPrompt: { variable: noop, section: noop },
+    webServer: {
+      register(route) {
+        if (state.routes.has(route.path)) {
+          throw new Error(`webserver: duplicate ${route.kind} route "${route.path}"`);
+        }
+        state.routes.set(route.path, route);
+        return () => state.routes.delete(route.path);
+      },
+    },
+  });
+  const pluginCfg = {
+    dir: backupMemDir, autoBackupMin: 0, inject: false, projectEnabled: false,
+    standingEnabled: false, learnEnabled: false, vectorEnabled: false,
+    memoryFtsEnabled: false, adminProfile: 'web',
+  };
+  const state = { routes: new Map(), effects: [] };
+  apply(makeCtx(state), pluginCfg);
+  const firstMount = state.routes.size;
+  check('admin routes register on the first mount', firstMount > 0, `routes=${firstMount}`);
+  // what cordis does on unload: run the effect disposers in reverse order
+  for (const dispose of state.effects.reverse()) if (typeof dispose === 'function') dispose();
+  check('unloading the plugin removes every admin route', state.routes.size === 0,
+    `left=${state.routes.size} of ${firstMount}`);
+  let remountError = null;
+  const second = { routes: state.routes, effects: [] };
+  try { apply(makeCtx(second), pluginCfg); } catch (e) { remountError = e; }
+  check('a reload remounts without a duplicate-route error',
+    remountError === null, remountError === null ? '' : String(remountError.message));
+  check('the reloaded plugin serves the same route count', second.routes.size === firstMount,
+    `routes=${second.routes.size}`);
+  for (const dispose of second.effects.reverse()) if (typeof dispose === 'function') dispose();
+}
+
 // cleanup
 fs.rmSync(testDir, { recursive: true, force: true });
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURES`);
