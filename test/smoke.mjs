@@ -1328,6 +1328,12 @@ import { registerCorrectCommand } from '../dist/lib/correct-command.js';
   const corrCfg = { enableSecretScanning: true, correctionDetection: true, correctionHumanOnly: true };
   registerCorrectCommand(cmdCtx, corrStore, corrCfg);
   check('/correct registers exactly one command', registered.length === 1 && registered[0].name === 'correct');
+  // The Web composer only turns a menu pick / Tab into a command chip with the
+  // caret left in the draft when the descriptor declares free-form input;
+  // without it the pick runs the bare command and the user can never reach the
+  // text field.
+  check('/correct declares a free-form input hint (menu pick fills the draft)',
+    typeof registered[0].input?.hint === 'string' && registered[0].input.hint.length > 0);
 
   const run = async (input) => await registered[0].handler({ rawInput: input });
 

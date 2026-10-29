@@ -27,7 +27,14 @@ export function registerCorrectCommand(ctx: Context, store: MemoryStore, cfg: Le
   ctx.commands.register({
     name: 'correct',
     description:
-      'Tell the memory plugin the model got something wrong — saves a correction so future sessions avoid repeating it. Usage: /correct <what was wrong and what to do instead>',
+      'Tell the memory plugin the model got something wrong — saves a correction so future sessions avoid repeating it.',
+    // `input` is load-bearing in the Web composer, not merely a hint: a
+    // descriptor that declares free-form input is a "leading claim", so a menu
+    // pick or Tab inserts `/correct ` as a chip and returns the caret to the
+    // draft (exactly how /feedback behaves). A descriptor WITHOUT it is run
+    // bare the instant it is picked — the old dead end where picking /correct
+    // answered "Usage: /correct <text>" and left no way to type the text.
+    input: { hint: '<what was wrong and what to do instead>' },
     handler: async ({ rawInput }) => {
       const text = rawInput.trim();
       if (!text) {
