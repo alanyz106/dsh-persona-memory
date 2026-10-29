@@ -13,6 +13,42 @@ import { scanContent } from './secret-scanner.js';
 import type { MemoryKind, MemoryStore } from './memory-store.js';
 import type { Context } from '@deepseek-ai/cordis';
 
+/**
+ * One line per mutating tool call. With the file exporter attached these are
+ * the audit trail for "who wrote this entry" — session id, action, store,
+ * outcome, and a content prefix. Read-only actions are not logged: they do
+ * not change memory and would triple the file's volume.
+ */
+function logWrite(
+  ctx: Context,
+  exec: ToolRunContext | undefined,
+  action: string,
+  which: string,
+  result: Record<string, unknown>,
+  preview: string,
+): void {
+  const sessionId = (exec as { agent?: { id?: string } } | undefined)?.agent?.id ?? 'unknown-session';
+  const outcome = result.duplicate
+    ? 'duplicate'
+    : result.overflow
+      ? 'overflow-refused'
+      : result.conflict
+        ? 'conflict'
+        : action === 'delete'
+          ? (result.deleted ? 'deleted' : 'not-found')
+          : action === 'rewrite'
+            ? `entries=${result.entryCount}`
+            : 'ok';
+  ctx.logger.info(
+    '[dsh-persona-memory] memory %s %s %s (%s): %s',
+    action,
+    which,
+    sessionId,
+    outcome,
+    preview.replace(/\s+/g, ' ').slice(0, 80),
+  );
+}
+
 export interface MemoryToolConfig extends ConsolidationConfig {
   memoryCharLimit: number;
   userCharLimit: number;
@@ -105,6 +141,7 @@ export function registerMemoryTool(
                 : content;
             rejectBlocked(entry, config);
             result = (await targetStore.add(which, entry, { dedupe: which === 'failure' })) as unknown as Record<string, unknown>;
+            logWrite(ctx, exec, 'add', which, result, entry);
             if (result.duplicate) {
               throw new HarnessError('That failure is already recorded — update it instead of adding a duplicate.', 'MEMORY_DUPLICATE_ENTRY');
             }
@@ -118,18 +155,23 @@ export function registerMemoryTool(
             const match = requireText(args.match, 'update', 'match');
             rejectBlocked(content, config);
             result = (await targetStore.update(which, match, content)) as unknown as Record<string, unknown>;
+            logWrite(ctx, exec, 'update', which, result, `${match} -> ${content}`);
             if (result.overflow) {
               result = await retryAfterConsolidation(args.action, { content, match }, config, ctx, targetStore, routeFor(exec), which, limit);
             }
             break;
           }
-          case 'delete':
-            result = (await targetStore.remove(which, requireText(args.match, 'delete', 'match'))) as unknown as Record<string, unknown>;
+          case 'delete': {
+            const match = requireText(args.match, 'delete', 'match');
+            result = (await targetStore.remove(which, match)) as unknown as Record<string, unknown>;
+            logWrite(ctx, exec, 'delete', which, result, match);
             break;
+          }
           case 'rewrite': {
             const content = requireText(args.content, 'rewrite');
             rejectBlocked(content, config);
             result = (await targetStore.rewrite(which, content)) as unknown as Record<string, unknown>;
+            logWrite(ctx, exec, 'rewrite', which, result, content);
             if (result.overflow) {
               result = await retryAfterConsolidation(args.action, content, config, ctx, targetStore, routeFor(exec), which, limit);
             }

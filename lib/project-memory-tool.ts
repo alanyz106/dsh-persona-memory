@@ -35,6 +35,24 @@ import {
 import type { JsonValue } from './json-value.js';
 import type { Context } from '@deepseek-ai/cordis';
 
+/**
+ * One line per mutating project-memory call — same audit purpose as the
+ * global `memory` tool's logWrite. `file` is empty for resident/index-wide
+ * actions; `detail` carries the target or outcome.
+ */
+function logProjectWrite(ctx: Context, exec: ToolRunContext | undefined, action: string, root: string, file: string, detail: string): void {
+  const sessionId = (exec as { agent?: { id?: string } } | undefined)?.agent?.id ?? 'unknown-session';
+  const short = root.split('/').pop() ?? root;
+  ctx.logger.info(
+    '[dsh-persona-memory] project_memory %s %s %s %s: %s',
+    action,
+    short,
+    sessionId,
+    file || '-',
+    detail.replace(/\s+/g, ' ').slice(0, 80),
+  );
+}
+
 export interface ProjectMemoryToolConfig {
   projectFileCharLimit: number;
   projectResidentCharLimit: number;
@@ -238,6 +256,7 @@ export function registerProjectMemoryTool(ctx: Context, deps: ProjectMemoryDeps)
             const indexed = await upsertIndex(root, rel, summary, budget);
             if (!indexed.ok) throw new HarnessError(indexed.error, 'PROJECT_INDEX_FAILED');
             deps.onWrite?.(root);
+            logProjectWrite(ctx, exec, 'write', root, rel, `chars=${wrote.chars} summary=${summary}`);
             return {
               file: rel,
               chars: wrote.chars,
@@ -261,6 +280,7 @@ export function registerProjectMemoryTool(ctx: Context, deps: ProjectMemoryDeps)
               if (!indexed.ok) throw new HarnessError(indexed.error, 'PROJECT_INDEX_FAILED');
             }
             deps.onWrite?.(root);
+            logProjectWrite(ctx, exec, 'append', root, rel, `chars=${appended.chars}`);
             return { file: rel, chars: appended.chars, limit: cfg.projectFileCharLimit } as unknown as Record<string, JsonValue>;
           }
 
@@ -275,6 +295,7 @@ export function registerProjectMemoryTool(ctx: Context, deps: ProjectMemoryDeps)
             deps.onWrite?.(root);
             if (!removed.ok && !cleared.ok) throw new HarnessError(removed.error, 'PROJECT_DELETE_FAILED');
             if (!cleared.ok) throw new HarnessError(cleared.error, 'PROJECT_INDEX_FAILED');
+            logProjectWrite(ctx, exec, 'delete', root, rel, removed.ok ? `trashed=${removed.trashed}` : 'not-found');
             return {
               file: rel,
               deleted: removed.ok,
@@ -304,6 +325,7 @@ export function registerProjectMemoryTool(ctx: Context, deps: ProjectMemoryDeps)
             }, budget);
             if (!result.ok) throw new HarnessError(result.error, 'PROJECT_RESIDENT_FULL');
             deps.onWrite?.(root);
+            logProjectWrite(ctx, exec, 'add_resident', root, '', `${lines.length} line(s): ${lines[0] ?? ''}`);
             return { added: lines.length, chars: residentChars(readIndex(root).resident) } as unknown as Record<string, JsonValue>;
           }
 
@@ -323,6 +345,7 @@ export function registerProjectMemoryTool(ctx: Context, deps: ProjectMemoryDeps)
             }, budget);
             if (!result.ok) throw new HarnessError(result.error, 'PROJECT_RESIDENT_NOT_FOUND');
             deps.onWrite?.(root);
+            logProjectWrite(ctx, exec, 'remove_resident', root, '', `matched=${match} removed=${removed}`);
             return { removed, chars: residentChars(readIndex(root).resident) } as unknown as Record<string, JsonValue>;
           }
 
@@ -334,7 +357,10 @@ export function registerProjectMemoryTool(ctx: Context, deps: ProjectMemoryDeps)
               residentCharLimit: cfg.projectResidentCharLimit,
               indexCharLimit: cfg.projectIndexCharLimit,
             });
-            if (result.migrated) deps.onWrite?.(root);
+            if (result.migrated) {
+              deps.onWrite?.(root);
+              logProjectWrite(ctx, exec, 'migrate', root, '', 'AGENTS.md split into resident + index');
+            }
             return result as unknown as Record<string, JsonValue>;
           }
 

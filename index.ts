@@ -33,6 +33,7 @@ import { projectBootstrapBlock, projectCoreLines, projectHasMemory } from './lib
 import { findGitRepoRoot } from './lib/projects.js';
 import { registerProject } from './lib/project-registry.js';
 import { makeAdminRoutes, profilePatchPath, startAutoProtect } from './lib/admin.js';
+import { registerFileLogger, defaultFileLogPath } from './lib/file-logger.js';
 import { renderMemoryBlock } from './lib/prompt.js';
 import { createFtsIndex } from './lib/fts.js';
 import { createVectorIndex } from './lib/vector-index.js';
@@ -120,6 +121,10 @@ export interface PluginConfig {
   adminAllowedHostsFile: string;
   autoBackupMin: number;
   autoSwitchOnPiLoss: boolean;
+  /** Write the plugin's log lines to a file under <dshHome>/logs/. */
+  fileLogEnabled: boolean;
+  /** Log file path; empty = <dshHome>/logs/persona-memory.log. */
+  fileLogPath: string;
   /** Loose extras accepted from the patch/config (schema-driven admin page). */
   [key: string]: unknown;
 }
@@ -329,9 +334,20 @@ export function apply(ctx: Context, config?: Record<string, unknown>): void {
     // auto-protect: periodic backup (minutes; 0=off) + Pi-loss fallback
     autoBackupMin: 60,
     autoSwitchOnPiLoss: true,
+    // 文件日志：cordis logger 默认只有内存缓冲，本部署没有 console exporter，
+    // info 级日志不落盘。开一个文件 sink 才能事后取证「记忆是谁改的」。
+    fileLogEnabled: true,
+    fileLogPath: '',
     ...(config as Partial<PluginConfig> | undefined),
   };
   cfg.dir = resolveDir(config); // explicit config.dir wins; defaults re-resolved
+
+  // The plugin's audit trail: every memory write (tool, learning, correction,
+  // consolidation) logs one line, and this sink is what puts them on disk.
+  registerFileLogger(ctx, {
+    fileLogEnabled: cfg.fileLogEnabled,
+    fileLogPath: cfg.fileLogPath || defaultFileLogPath(),
+  });
 
   const memoryDir = cfg.dir;
   const store = createMemoryStore({

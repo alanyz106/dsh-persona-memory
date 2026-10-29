@@ -138,7 +138,7 @@ export function registerLifecycleHooks(
             turnsSinceCorrection.set(session.id, 0);
             const text = lastDirectUserText(session);
             if (text) {
-              saveCorrection(store, cfg, extractCorrectionDirective(text)).catch((err) =>
+              saveCorrection(store, cfg, extractCorrectionDirective(text), 'pattern', ctx.logger).catch((err) =>
                 ctx.logger.warn('[dsh-persona-memory] correction save failed: %s', (err as Error | undefined)?.message ?? String(err)),
               );
             }
@@ -200,19 +200,30 @@ function lastDirectUserText(session: Session): string {
  * the /correct command (explicit user intent) and from in-chat pattern
  * detection (rate-limited). Deduped; overflow/conflict drops the entry.
  */
-export async function saveCorrection(store: MemoryStore, cfg: LearningConfig, text: string): Promise<void> {
+export async function saveCorrection(
+  store: MemoryStore,
+  cfg: LearningConfig,
+  text: string,
+  source: 'command' | 'pattern' = 'pattern',
+  logger?: { info: (format: string, ...param: unknown[]) => void },
+): Promise<void> {
   // Corrections are captured as failure memory (category correction) — they
   // surface in the injected recent-failures block so the model learns from
   // them, and stay out of MEMORY.md unless promoted by an explicit add.
   const entry = buildFailureText(text, { category: 'correction' });
-  if (cfg.enableSecretScanning && scanContent(entry)) return;
+  if (cfg.enableSecretScanning && scanContent(entry)) {
+    logger?.info('[dsh-persona-memory] correction (%s) blocked by scanner: %s', source, text.slice(0, 80));
+    return;
+  }
   const result = await store.add('failure', entry, { dedupe: true });
-  if (!result.overflow && !result.conflict) return;
+  if (!result.overflow && !result.conflict) {
+    logger?.info('[dsh-persona-memory] correction (%s) saved: %s', source, text.replace(/\s+/g, ' ').slice(0, 80));
+    return;
+  }
   // Over budget or a concurrent external write — the correction simply does
   // not land this time; consolidation of failure memory is rare and the
   // failure block only injects the most recent entries anyway.
-  // eslint-disable-next-line no-console
-  console.warn('[dsh-persona-memory] correction save skipped (overflow/conflict): %s', entry.slice(0, 80));
+  logger?.info('[dsh-persona-memory] correction (%s) skipped (overflow/conflict): %s', source, entry.slice(0, 80));
 }
 
 async function runLearning(

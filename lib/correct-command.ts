@@ -45,7 +45,7 @@ export function registerCorrectCommand(ctx: Context, store: MemoryStore, cfg: Le
         }
       }
       try {
-        await saveCorrection(store, cfg, text);
+        await saveCorrection(store, cfg, text, 'command', ctx.logger);
         return {
           kind: 'success',
           text: `已记录纠正：${text}\n将注入后续会话的 failures 上下文，帮助模型避免重复该错误。`,

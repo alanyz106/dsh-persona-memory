@@ -400,6 +400,8 @@ export const CFG_SCHEMA: SchemaField[] = [
   { key: 'adminProfile', type: 'string', label: '配置写回 profile', group: '管理', help: '默认 web' },
   { key: 'adminAllowedHosts', type: 'string', label: '管理接口允许的额外主机', group: '管理', help: '隧道/反代时填公网域名，多个用逗号分隔；仍要求连接来自本机回环' },
   { key: 'autoBackupMin', type: 'number', label: '自动备份间隔（分钟）', group: '备份', help: '0=关闭；默认 60；只保留最新一份' },
+  { key: 'fileLogEnabled', type: 'bool', label: '文件日志', group: '管理', help: '把插件日志（含每次记忆写入的审计行）写到 <dshHome>/logs/persona-memory.log；默认开' },
+  { key: 'fileLogPath', type: 'string', label: '日志文件路径', group: '管理', help: '留空用默认 <dshHome>/logs/persona-memory.log' },
   { key: 'autoSwitchOnPiLoss', type: 'bool', label: 'Pi 丢失自动切换', group: '备份', help: 'Pi 记忆消失时自动切到本地并恢复' },
 ];
 
@@ -419,6 +421,7 @@ export const CFG_DEFAULTS: Record<string, unknown> = {
   memoryFtsEnabled: true, vectorEnabled: false, embeddingProvider: 'remote', embeddingModel: 'text-embedding-3-small',
   embeddingRemoteHost: 'https://huggingface.co', adminProfile: 'web', adminAllowedHosts: '',
   autoBackupMin: 60, autoSwitchOnPiLoss: true,
+  fileLogEnabled: true, fileLogPath: '',
 };
 
 // ------------------------------------------------- profile patch (config)

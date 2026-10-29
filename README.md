@@ -182,6 +182,8 @@ file: 安装是真实副本——改代码后须重新构建、`dsh plugin --pro
 | `embeddingRemoteHost` | `https://huggingface.co` | local 模型下载源；大陆可用 `https://hf-mirror.com` |
 | `adminProfile` | `web` | 记忆管理页配置写回的目标 profile（`~/.dsh/profiles/<名>/cordis.patch.yml`） |
 | `autoBackupMin` | `60` | 自动备份间隔（分钟）；`0` 关闭；只保留最新一份快照到 `$DSH_HOME/memory-backup/latest/` |
+| `fileLogEnabled` | `true` | 文件日志：把插件日志（每次记忆写入的审计行、学习运行统计、纠正落盘）写到 `$DSH_HOME/logs/persona-memory.log`。cordis logger 默认只有内存缓冲、无 exporter 不落盘，本开关补上 sink |
+| `fileLogPath` | `''` | 日志文件路径；留空用默认 `$DSH_HOME/logs/persona-memory.log` |
 | `autoSwitchOnPiLoss` | `true` | Pi 共享记忆丢失（曾见 MEMORY.md 后消失）时自动切到 `$DSH_HOME/memory` 并从最新备份恢复 |
 | `learnEnabled` | `true` | 是否启用后台自动学习 |
 | `learnHumanOnly` | `true` | 仅人类驱动的主会话做后台学习；子代理/派生会话的对话不写入记忆 |
