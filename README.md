@@ -40,7 +40,7 @@
 | 功能 | 说明 |
 |---|---|
 | 后台学习 | 每 `learnIntervalTurns`（默认 10）轮用会话自身 LLM 路由复习近期对话，自动提取**跨项目**持久事实存入全局记忆。**项目专属知识不写全局**（由主模型的 `project_memory` 维护）；学习模型会拿到当前项目记忆摘要做去重判断，transcript 中宿主注入的 AGENTS.md 标记为 `PROJECT-INSTRUCTIONS` 并禁止再提取 |
-| 纠正检测 | `/feedback` 事件 + 对话内模式检测（强/弱/负向模式 + 指令词，仅直接人工消息，3 轮限频）→ 立即存 `[correction]` 失败条目 |
+| 纠正检测 | **`/correct` 命令**（显式纠正，立即落盘、不限频）+ 对话内模式检测（强/弱/负向模式 + 指令词，仅直接人工消息，3 轮限频）→ 存 `[correction]` 失败条目。**不再消费官方 `/feedback` 事件**：那是 harness 的会话反馈命令（遥测用途），把产品吐槽误存成模型纠正属语义错位，本次起解耦 |
 | 失败记忆 | `failures.md` 结构化记录 `[category] 内容 — Failed: 原因 — Corrected to: 修正`；最近 7 天最多 5 条自动注入上下文（`memory:failures` 段），防止重蹈覆辙 |
 | 自动合并 | 记忆超限时用 LLM 合并精简（>30 天无引用可删、偏好/纠正优先保留）；**只有结果严格更小、可解析且过扫描才提交**，失败绝不损坏记忆 |
 
@@ -90,7 +90,7 @@
 |---|---|---|
 | 后台学习 | hermes 每 10 轮复习 | DSH `session/event` 钩子 + `ctx.llm.stream` + 自写提示词 |
 | 自动合并 | hermes `auto-consolidate.ts` | 超限触发、合并规则、**严格更小才提交**安全护栏 |
-| 纠正检测落库 | hermes 自动失败捕获 | `feedback/record` 事件 + 对话内模式 → `[correction]` 失败条目 |
+| 纠正检测落库 | hermes 自动失败捕获 | `/correct` 命令 + 对话内模式 → `[correction]` 失败条目（官方 `/feedback` 事件已解耦，不再消费） |
 | 记忆老化 | hermes Memory Aging | `created/last` 日期驱动合并决策 |
 
 ### 4. DSH 原生（未借鉴 hermes，基于 DSH API 构建）

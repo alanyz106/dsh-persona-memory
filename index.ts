@@ -38,6 +38,7 @@ import { createFtsIndex } from './lib/fts.js';
 import { createVectorIndex } from './lib/vector-index.js';
 import { allowsInjection, sessionOf } from './lib/sessions.js';
 import { registerStandingCommand } from './lib/standing-command.js';
+import { registerCorrectCommand } from './lib/correct-command.js';
 import { createStandingStore, type StandingStore } from './lib/standing.js';
 import type { Context } from '@deepseek-ai/cordis';
 
@@ -444,6 +445,11 @@ export function apply(ctx: Context, config?: Record<string, unknown>): void {
 
   if (cfg.standingEnabled) {
     registerStandingCommand(ctx, standing);
+  }
+  // /correct 显式纠正入口（原先是搭官方 /feedback 的事件便车，语义错位，已解耦）。
+  // 纠正检测关闭时命令也没有存在意义，跟随 correctionDetection 开关。
+  if (cfg.correctionDetection) {
+    registerCorrectCommand(ctx, store, cfg as LearningConfig);
   }
 
   if (cfg.inject) {

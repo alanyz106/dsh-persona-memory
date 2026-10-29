@@ -28,15 +28,6 @@ import type { MemoryStore } from './memory-store.js';
 import type { Context } from '@deepseek-ai/cordis';
 import type { Session } from '@deepseek-ai/dsh-session';
 
-// The `feedback/record` event is contributed by @deepseek-ai/dsh-command-feedback
-// through declaration merging on SessionEventMap; mirror the same merge so this
-// module's `event.data?.text` access type-checks without a runtime dependency.
-declare module '@deepseek-ai/dsh-session/types' {
-  interface SessionEventMap {
-    'feedback/record': { text: string };
-  }
-}
-
 const LEARNING_SYSTEM_PROMPT = `You are a memory curator for a coding agent that persists long-term persona memory across sessions.
 
 Read the recent conversation transcript and extract durable, factual entries worth remembering later in the GLOBAL memory: user preferences and identity facts, environment details, machine/tool quirks, and lessons that hold across repositories, and anything already covered by the current memory below.
@@ -122,16 +113,6 @@ export function registerLifecycleHooks(
     try {
       const allowed = sessionCapturePolicy(cfg, session);
       if (!allowed.learning && !allowed.corrections) return;
-      // /feedback command event — immediate correction save.
-      if (event.type === 'feedback/record' && allowed.corrections) {
-        const text = event.data?.text;
-        if (typeof text === 'string' && text.trim()) {
-          saveCorrection(store, cfg, text).catch((err) =>
-            ctx.logger.warn('[dsh-persona-memory] correction save failed: %s', (err as Error | undefined)?.message ?? String(err)),
-          );
-        }
-        return;
-      }
       // In-chat correction detection — only on DIRECT human prompts
       // (source.kind === 'user'; synthetic contexts are 'plugin').
       if (event.type === 'user/message' && allowed.corrections && cfg.correctionPatternDetection) {
@@ -214,7 +195,12 @@ function lastDirectUserText(session: Session): string {
   return '';
 }
 
-async function saveCorrection(store: MemoryStore, cfg: LearningConfig, text: string): Promise<void> {
+/**
+ * Persist one correction as failure memory (category `correction`). Called from
+ * the /correct command (explicit user intent) and from in-chat pattern
+ * detection (rate-limited). Deduped; overflow/conflict drops the entry.
+ */
+export async function saveCorrection(store: MemoryStore, cfg: LearningConfig, text: string): Promise<void> {
   // Corrections are captured as failure memory (category correction) — they
   // surface in the injected recent-failures block so the model learns from
   // them, and stay out of MEMORY.md unless promoted by an explicit add.
