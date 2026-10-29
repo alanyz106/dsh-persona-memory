@@ -1163,24 +1163,81 @@ check('an unknown source kind falls back to USER',
 check('a genuine source.kind user renders as USER', renderTranscriptLine(textMsg('user', 'real', 'user')) === 'USER: real');
 check('an empty message renders nothing', renderTranscriptLine(textMsg('user', '   ')) === null);
 
-// --- buildTranscript end-to-end over a fake session
-import { buildTranscript } from '../dist/lib/learning.js';
-const fakeSession = (messages) => ({ deriveMessages: () => messages, id: 'fake' });
-const transcript = buildTranscript(fakeSession([
-  textMsg('user', 'irrelevant runtime noise', 'runtime-context'),
-  textMsg('user', '我更喜欢中文回答'),
-  textMsg('user', 'Updated instructions from: AGENTS.md — 改完先 node --check', 'agent-instructions'),
-  textMsg('assistant', '好的，已记录'),
+// --- buildTranscript end-to-end over a fake session (round-based)
+import { buildTranscript, extractTurns } from '../dist/lib/learning.js';
+// buildTranscript now segments by direct user prompts in the event stream, so
+// fake sessions are expressed as events: [kind, text] with an optional
+// { calls: true } marker for a mid-work assistant step.
+const ev = (type, data) => ({ type, data });
+const userEv = (text) => ev('user/message', { source: { kind: 'user' }, content: [{ type: 'text', text }] });
+const noiseEv = (kind, text) => ev('user/message', { source: { kind }, content: [{ type: 'text', text }] });
+const stepEv = (text, withCall) => ev('assistant/message', { message: { content: [...(withCall ? [{ type: 'tool-call' }] : []), ...(text ? [{ type: 'text', text }] : [])] } });
+
+const eventSession = (events) => ({ events, id: 'fake', deriveMessages: () => { throw new Error('round path must not need deriveMessages'); } });
+
+// three rounds, the middle one with a queued second prompt and tool noise
+const transcript = buildTranscript(eventSession([
+  noiseEv('runtime-context', 'cwd=/x'),                       // harness noise: ignored
+  userEv('第一轮：我更喜欢中文回答'),
+  stepEv('先看一眼配置', true),                                // mid-work narration
+  stepEv('第一轮的答案', false),                               // final answer
+  userEv('第二轮：AGENTS.md 咋改'),
+  noiseEv('agent-instructions', 'AGENTS.md: 改完先 node --check'), // injected, not the user
+  userEv('第二轮补充：还有 build 脚本'),                        // queued follow-up
+  stepEv('第二轮的答案', false),
+  userEv('第三轮：好了'),
+  stepEv('第三轮的答案', false),
 ]), 2, 6000);
-check('buildTranscript labels sources', /USER: 我更喜欢中文回答/.test(transcript) && /ASSISTANT: 好的/.test(transcript));
-check('buildTranscript tags injected instructions', /PROJECT-INSTRUCTIONS/.test(transcript), transcript);
-check('buildTranscript drops skipped sources', !/irrelevant runtime noise/.test(transcript));
-const clipped = buildTranscript(fakeSession([
-  textMsg('user', 'A'.repeat(100)),
-  textMsg('assistant', 'B'.repeat(100)),
-]), 2, 120);
-check('buildTranscript keeps the tail and drops whole lines', clipped.length <= 130 && clipped.includes('B'.repeat(100)) && !clipped.includes('A'.repeat(100)), String(clipped.length));
-check('buildTranscript survives a broken session', buildTranscript({ deriveMessages: () => { throw new Error('x'); } }, 2, 100) === '');
+check('round path keeps only USER/ASSISTANT lines', transcript.split('\n').every((l) => l === '' || l.startsWith('USER: ') || l.startsWith('ASSISTANT: ') || l === '…(truncated)'), JSON.stringify(transcript.split('\n').slice(0, 3)));
+check('round path takes the last N rounds', /第二轮/.test(transcript) && /第三轮/.test(transcript) && !/第一轮/.test(transcript), transcript);
+check('queued prompts join their round', /第二轮：AGENTS.md 咋改/.test(transcript) && /第二轮补充：还有 build 脚本/.test(transcript));
+check('tool narration never enters the transcript', !/先看一眼配置/.test(transcript));
+check('harness noise (runtime-context etc.) is dropped', !/cwd=\/x/.test(transcript) && !/AGENTS.md: 改完先/.test(transcript));
+check('every surviving line is labeled', transcript.split('\n').filter((l) => l.trim() && !l.startsWith('…')).every((l) => l.startsWith('USER: ') || l.startsWith('ASSISTANT: ')));
+
+// trimming drops whole rounds, never cuts one open
+const fatRounds = buildTranscript(eventSession([
+  userEv('R1 question'), stepEv('R1 ' + 'x'.repeat(2000), false),
+  userEv('R2 question'), stepEv('R2 ' + 'x'.repeat(2000), false),
+  userEv('R3 question'), stepEv('R3 ' + 'x'.repeat(2000), false),
+]), 3, 3000);
+// each round is ~2015 chars, so a 3000 budget holds exactly one — the last
+check('oversized window drops whole rounds from the front', fatRounds.startsWith('USER: R3 question') && !fatRounds.includes('R1 question') && !fatRounds.includes('R2 question'), fatRounds.slice(0, 60));
+check('trimmed output stays within budget', fatRounds.length <= 3000, String(fatRounds.length));
+
+// a single round bigger than the whole budget keeps its question
+const giant = buildTranscript(eventSession([
+  userEv('the one question that matters'),
+  stepEv('A'.repeat(5000), false),
+]), 1, 1000);
+check('an over-budget single round keeps its question', giant.startsWith('USER: the one question that matters') && giant.length <= 1012, String(giant.length));
+
+// turn without an answer still contributes its prompts
+const unanswered = buildTranscript(eventSession([
+  userEv('被追问打断的问题'),
+  stepEv('跑到一半', true),
+  userEv('下一个问题'),
+  stepEv('下一个答案', false),
+]), 2, 6000);
+check('an interrupted round keeps its question without fabricating an answer', /被追问打断的问题/.test(unanswered) && /下一个答案/.test(unanswered));
+
+// synthetic sessions without events fall back to the message projection
+const fallback = buildTranscript({ events: [], deriveMessages: () => [
+  { role: 'user', content: [{ type: 'text', text: 'fallback question' }] },
+  { role: 'assistant', content: [{ type: 'text', text: 'fallback answer' }] },
+] , id: 'fb' }, 2, 6000);
+check('sessions without events fall back to deriveMessages', /USER: fallback question/.test(fallback) && /ASSISTANT: fallback answer/.test(fallback), fallback);
+check('broken deriveMessages still degrades to empty', buildTranscript({ events: [], deriveMessages: () => { throw new Error('x'); }, id: 'x' }, 2, 100) === '');
+
+// real-shaped regression: 336-turn archive check compressed into one case
+const mixed = extractTurns(eventSession([
+  userEv('q1'), stepEv('narration', true), stepEv('a1', false),
+  noiseEv('time-context', '<t/>'),
+  userEv('q2a'), userEv('q2b'), userEv('q2c'), stepEv('a2', false),
+]), 5);
+check('extractTurns: one round per user question', mixed.length === 2, JSON.stringify(mixed.length));
+check('extractTurns: consecutive prompts land in one round', mixed[1].user.length === 3, JSON.stringify(mixed[1].user.length));
+check('extractTurns: round answer is the last text-only step', mixed[0].assistant === 'a1');
 
 // --- end-to-end: runLearning's prompt carries the tagged transcript + project summary
 import { registerLifecycleHooks } from '../dist/lib/learning.js';
@@ -1205,15 +1262,17 @@ const learnCtx = {
     learnCtx.handler = cb;
   },
 };
-// the session's own LLM route comes from its request/header event
+// The session's own LLM route comes from its request/header event; the
+// conversation is event-shaped like a real session (round segmentation reads
+// this), with the injected AGENTS.md distinguishable from the human line.
 const learnSession = {
   id: 'learn-e2e',
   header: { cwd: learnRoot },
-  events: [{ type: 'request/header', data: { header: { config: { provider: 'p', model: 'm' } } } }],
-  deriveMessages: () => [
-    textMsg('user', '我更喜欢中文回答'),
-    textMsg('user', 'AGENTS.md: 构建后先 node --check', 'agent-instructions'),
-    textMsg('assistant', '好的'),
+  events: [
+    { type: 'request/header', data: { header: { config: { provider: 'p', model: 'm' } } } },
+    { type: 'user/message', data: { source: { kind: 'user' }, content: [{ type: 'text', text: '我更喜欢中文回答' }] } },
+    { type: 'assistant/message', data: { message: { content: [{ type: 'tool-call' }, { type: 'text', text: '先查一下' }] } } },
+    { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '好的' }] } } },
   ],
 };
 registerLifecycleHooks(learnCtx, learnStore, {
@@ -1232,8 +1291,8 @@ check('the learner prompt carries the project memory section',
   /Project memory \(already stored/.test(learnedPrompt), learnedPrompt.slice(0, 120));
 check('the learner prompt shows the project index and resident rules',
   learnedPrompt.includes('@memory/build.md') && learnedPrompt.includes('构建后先 node --check'));
-check('the learner prompt tags injected instructions separately from the user',
-  /PROJECT-INSTRUCTIONS/.test(learnedPrompt) && /USER: 我更喜欢中文回答/.test(learnedPrompt));
+check('the learner prompt tags the human line and drops injected instructions',
+  /USER: 我更喜欢中文回答/.test(learnedPrompt) && !/AGENTS.md: 构建后先/.test(learnedPrompt) && !/先查一下/.test(learnedPrompt));
 check('the learning run never writes project memory',
   !fs.existsSync(path.join(learnRoot, 'memory', 'build.md')));
 

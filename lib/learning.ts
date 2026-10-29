@@ -300,6 +300,9 @@ async function runLearning(
   }
 }
 
+/** Share of the summary budget the topic index may claim before resident prose. */
+const INDEX_BUDGET_SHARE = 0.4;
+
 /**
  * Project memory as the learner needs to see it: the resident rules and the
  * `@memory/...` index descriptions — never the topic file bodies. Those are
@@ -307,10 +310,10 @@ async function runLearning(
  * `learnMaxChars` and the point of the split.
  *
  * Budget: the index is the coverage map ("this topic is already written down
- * somewhere"), so it gets first claim on up to `INDEX_RESERVE` of the budget
- * and the resident prose takes the rest — truncating the tail. The reverse
- * order loses the index entirely on any repository with a real AGENTS.md,
- * which is precisely the case the summary exists for.
+ * somewhere"), so it gets first claim on up to `INDEX_BUDGET_SHARE` of the
+ * budget and the resident prose takes the rest — truncating the tail. The
+ * reverse order loses the index entirely on any repository with a real
+ * AGENTS.md, which is precisely the case the summary exists for.
  *
  * @param index parsed AGENTS.md index
  * @param charLimit budget for the rendered summary; 0/negative = unbounded
@@ -330,7 +333,7 @@ export function renderProjectContextSummary(index: ProjectIndex, charLimit: numb
     return [rootLine, residentBlock, indexBlock].filter(Boolean).join('\n');
   }
   // Spend on the index first, then the resident prose with what is left.
-  const indexAllowance = Math.min(indexBlock.length, Math.floor(charLimit * 0.4));
+  const indexAllowance = Math.min(indexBlock.length, Math.floor(charLimit * INDEX_BUDGET_SHARE));
   const residentAllowance = charLimit - rootLine.length - indexAllowance - 2; // 2 separator newlines
   const fit = (block: string, allowance: number): string => {
     if (!block || allowance <= 0) return '';
@@ -406,16 +409,120 @@ export function renderTranscriptLine(msg: TranscriptMessage): string | null {
 }
 
 /**
- * @returns bounded recent user/assistant transcript, tagged by source
+ * One turn as the learner sees it: every message the human sent, then the
+ * agent's final answer. Nothing in between — the tool-call stream is where the
+ * agent spent 20 messages iterating on a build, and it teaches the curator
+ * nothing about the user while crowding out the messages that do.
+ */
+export interface TranscriptTurn {
+  /**
+   * One entry per direct user message, in order. A turn can hold several: the
+   * user sends one thought, sees the agent start, then sends another. Each is
+   * kept separately — collapsing them into one paragraph destroys the fact
+   * boundaries the curator reads.
+   */
+  user: string[];
+  /** Final answer: the last assistant message with text and no tool call. */
+  assistant: string;
+}
+
+/**
+ * Split the session into rounds — one round per user question — and keep the
+ * last `recentTurns` of them.
+ *
+ * Rounds are segmented by DIRECT USER PROMPTS, not by `turn/end`: a harness
+ * turn is one agent run, which background-job settles and user interrupts cut
+ * at arbitrary points. Measured on this deployment's archived sessions, 12 of
+ * 33 turns ended without their answer (it landed in the next turn), so
+ * turn-marker segmentation would strand questions from their answers.
+ *
+ * A direct prompt opens a new round only when the previous round already has
+ * its answer; prompts that arrive while the agent is still working (queued
+ * follow-ups, a confirmation after an interruption) join the open round. The
+ * round's answer is the last assistant message carrying text and no
+ * `tool-call` block — everything with a tool call is mid-work narration
+ * ("now I'll check X", "tests pass so far") and never an answer. Synthetic
+ * user-role messages (time/runtime context, the skill catalog, AGENTS.md) are
+ * the harness talking; they neither open a round nor enter one.
+ *
+ * @returns rounds in chronological order, at most `recentTurns` of them
+ */
+export function extractTurns(session: Session, recentTurns: number): TranscriptTurn[] {
+  const events = sessionEvents(session);
+  const rounds: TranscriptTurn[] = [];
+  let current: TranscriptTurn | null = null;
+  for (const event of events) {
+    const carrier = event as unknown as {
+      type?: string;
+      data?: {
+        source?: { kind?: string };
+        content?: readonly { type: string; text?: string }[];
+        message?: { content?: readonly { type: string; text?: string }[] };
+      };
+    };
+    // Direct human prompt. Synthetic user-role messages (time/runtime context,
+    // the skill catalog, AGENTS.md) are the harness talking, not the user.
+    if (carrier.type === 'user/message') {
+      if (carrier.data?.source?.kind !== 'user') continue;
+      const text = textOf(carrier.data.content);
+      if (!text) continue;
+      if (!current || current.assistant) {
+        current = { user: [], assistant: '' };
+        rounds.push(current);
+      }
+      current.user.push(text);
+      continue;
+    }
+    if (carrier.type === 'assistant/message' && current) {
+      const blocks = carrier.data?.message?.content;
+      if (!blocks) continue;
+      // A step that called a tool is mid-work narration, not an answer.
+      // Later qualifying steps overwrite it, so the last one wins.
+      if (blocks.some((b) => b.type === 'tool-call')) continue;
+      const text = textOf(blocks);
+      if (text) current.assistant = text;
+    }
+  }
+  return rounds.slice(-Math.max(1, recentTurns));
+}
+
+function textOf(blocks: readonly { type: string; text?: string }[] | undefined): string {
+  if (!blocks) return '';
+  return blocks
+    .filter((b) => b.type === 'text')
+    .map((b) => b.text ?? '')
+    .join(' ')
+    .trim();
+}
+
+/**
+ * @returns bounded recent conversation as user/assistant pairs, tagged by source
  */
 export function buildTranscript(session: Session, recentTurns: number, maxChars: number): string {
+  const turns = extractTurns(session, recentTurns);
+  if (turns.length > 0) {
+    // Trim by whole turns, never by line: dropping leading lines would cut a
+    // turn open and leave an ASSISTANT answer with no question above it, or
+    // just a fragment of one.
+    const blocks = turns.map((turn) => {
+      const lines: string[] = [];
+      // One line per message: a user who sent three prompts in one turn keeps
+      // three separate USER lines, followed by the single ASSISTANT answer.
+      for (const text of turn.user) lines.push(`USER: ${text}`);
+      if (turn.assistant) lines.push(`ASSISTANT: ${turn.assistant}`);
+      return lines.join('\n');
+    });
+    return clipTurns(blocks, maxChars);
+  }
+  // No turn markers available (older archives, synthetic sessions): fall back
+  // to the derived-message projection, tagged so injected instructions are
+  // still distinguishable from what the user typed.
   let messages: ReturnType<Session['deriveMessages']>;
   try {
     messages = session.deriveMessages();
   } catch {
     return '';
   }
-  // tail slice: roughly 3 events per turn window
   const limit = Math.max(1, Math.floor(recentTurns * 3));
   const tail = messages.slice(-limit) as unknown as readonly TranscriptMessage[];
   const lines: string[] = [];
@@ -424,15 +531,35 @@ export function buildTranscript(session: Session, recentTurns: number, maxChars:
     const line = renderTranscriptLine(msg);
     if (line) lines.push(line);
   }
-  let out = lines.join('\n');
-  if (maxChars > 0 && out.length > maxChars) {
-    // Drop whole leading lines rather than slicing mid-line: a cut label
-    // ("SISTANT: …") reads as an unlabeled fact and loses its provenance.
-    while (lines.length > 1 && lines.join('\n').length > maxChars) lines.shift();
-    out = lines.join('\n');
-    if (out.length > maxChars) out = out.slice(out.length - maxChars);
-  }
-  return out;
+  return clipTranscript(lines, maxChars);
+}
+
+/**
+ * Trim whole turns from the front until the rest fits, so a surviving turn is
+ * never a fragment. The last turn alone may still be over budget; a single
+ * over-long turn keeps its question and tails off, because the question is the
+ * part that tells the curator who the user is.
+ */
+function clipTurns(blocks: string[], maxChars: number): string {
+  if (maxChars <= 0) return blocks.join('\n');
+  while (blocks.length > 1 && blocks.join('\n').length > maxChars) blocks.shift();
+  const out = blocks.join('\n');
+  if (out.length <= maxChars) return out;
+  const cut = out.slice(0, maxChars);
+  const lastBreak = cut.lastIndexOf('\n');
+  const kept = lastBreak > 0 ? cut.slice(0, lastBreak) : cut;
+  return `${kept}\n…(truncated)`;
+}
+
+/**
+ * Trim to the tail while keeping every surviving line labeled: a mid-line cut
+ * ("SISTANT: …") reads as an unlabeled fact and loses its provenance.
+ */
+function clipTranscript(lines: string[], maxChars: number): string {
+  if (maxChars <= 0) return lines.join('\n');
+  while (lines.length > 1 && lines.join('\n').length > maxChars) lines.shift();
+  const out = lines.join('\n');
+  return out.length > maxChars ? out.slice(out.length - maxChars) : out;
 }
 
 /**
