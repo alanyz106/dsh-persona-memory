@@ -71,6 +71,10 @@ export interface PluginConfig {
   learnRecentTurns: number;
   learnMaxChars: number;
   learnTimeoutMs: number;
+  /** 学习时把当前项目记忆摘要一并给模型，作为「别再提取」的判断依据。 */
+  learnProjectContext: boolean;
+  /** 该摘要的字符预算（常驻区 + @memory 索引行）。 */
+  learnProjectContextCharLimit: number;
   autoConsolidate: boolean;
   consolidateStaleDays: number;
   consolidateTimeoutMs: number;
@@ -265,6 +269,10 @@ export function apply(ctx: Context, config?: Record<string, unknown>): void {
     learnRecentTurns: 2,
     learnMaxChars: 6000,
     learnTimeoutMs: 120000,
+    // 后台学习只写全局记忆；把项目记忆摘要（常驻区 + @memory 索引）传给学习
+    // 模型，让它能判断「这条已在项目记忆里」而跳过。只传摘要不传正文。
+    learnProjectContext: true,
+    learnProjectContextCharLimit: 1500,
     // auto-consolidation when a store exceeds its char limit (LLM merge,
     // committed only when strictly smaller and scanner-clean)
     autoConsolidate: true,
@@ -349,9 +357,20 @@ export function apply(ctx: Context, config?: Record<string, unknown>): void {
     provider: embedding,
   });
 
+  // 会话工作目录。工具侧入口拿到的是 ToolRunContext（exec），学习/注入侧拿到
+  // 的是 session 本身；两个入口都落到同一个 cwdFromSession，不另写一套解析。
+  const cwdOf = (exec: { agent?: { session?: unknown } }): string | null => {
+    const session = exec.agent?.session;
+    if (!session) return null;
+    return cwdFromSession(ctx, session);
+  };
+  const cwdOfSession = (session: unknown): string | null => cwdFromSession(ctx, session);
+
   registerMemoryTool(ctx, store, cfg as MemoryToolConfig);
   registerMemorySearchTool(ctx, store, cfg, fts, vector);
-  registerLifecycleHooks(ctx, store, cfg as LearningConfig);
+  // 后台学习只写全局记忆，但要靠当前项目的记忆摘要判断「这条已经在项目记忆里」，
+  // 所以这里必须能拿到会话 cwd。
+  registerLifecycleHooks(ctx, store, cfg as LearningConfig, cwdOfSession);
 
   // 最近一次请求用过的模型路由。辅助 LLM 特性（学习、合并、迁移）都复用它；
   // 管理页可能在任何会话出现之前被打开，所以这里按事件更新、按需读取。
@@ -365,11 +384,6 @@ export function apply(ctx: Context, config?: Record<string, unknown>): void {
   // 项目记忆：AGENTS.md（常驻区 + @ 指针索引）+ memory/ 主题文件。
   // 作用域 = 会话工作目录所属的 git 仓库根（worktree 共享），无 project 参数。
   if (cfg.projectEnabled) {
-    const cwdOf = (exec: { agent?: { session?: unknown } }): string | null => {
-      const session = exec.agent?.session;
-      if (!session) return null;
-      return cwdFromSession(ctx, session);
-    };
     registerProjectMemoryTool(ctx, {
       config: {
         projectFileCharLimit: cfg.projectFileCharLimit,

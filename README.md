@@ -39,7 +39,7 @@
 
 | 功能 | 说明 |
 |---|---|
-| 后台学习 | 每 `learnIntervalTurns`（默认 10）轮用会话自身 LLM 路由复习近期对话，自动提取持久事实存入记忆 |
+| 后台学习 | 每 `learnIntervalTurns`（默认 10）轮用会话自身 LLM 路由复习近期对话，自动提取**跨项目**持久事实存入全局记忆。**项目专属知识不写全局**（由主模型的 `project_memory` 维护）；学习模型会拿到当前项目记忆摘要做去重判断，transcript 中宿主注入的 AGENTS.md 标记为 `PROJECT-INSTRUCTIONS` 并禁止再提取 |
 | 纠正检测 | `/feedback` 事件 + 对话内模式检测（强/弱/负向模式 + 指令词，仅直接人工消息，3 轮限频）→ 立即存 `[correction]` 失败条目 |
 | 失败记忆 | `failures.md` 结构化记录 `[category] 内容 — Failed: 原因 — Corrected to: 修正`；最近 7 天最多 5 条自动注入上下文（`memory:failures` 段），防止重蹈覆辙 |
 | 自动合并 | 记忆超限时用 LLM 合并精简（>30 天无引用可删、偏好/纠正优先保留）；**只有结果严格更小、可解析且过扫描才提交**，失败绝不损坏记忆 |
@@ -189,6 +189,8 @@ file: 安装是真实副本——改代码后须重新构建、`dsh plugin --pro
 | `learnRecentTurns` | `2` | 每次复习取最近多少个轮次的对话 |
 | `learnMaxChars` | `6000` | 复习用的对话/记忆摘要最大字符数 |
 | `learnTimeoutMs` | `120000` | 学习 LLM 调用的超时 |
+| `learnProjectContext` | `true` | 把当前项目记忆摘要（常驻区 + `@memory` 索引行）一并传给学习模型，用于「这条已在项目记忆里 → 跳过」的判断；**只传摘要不传主题文件正文**；项目知识本身仍不写全局记忆 |
+| `learnProjectContextCharLimit` | `1500` | 上述项目摘要的字符预算，超出截断并标记 `…(truncated)` |
 | `standingEnabled` | `true` | 是否启用常驻指令（STANDING.md + `/standing` 命令） |
 | `standingCharLimit` | `2000` | STANDING.md 注入预算（硬上限） |
 | `standingMaxEntries` | `20` | STANDING.md 最大条数（硬上限） |

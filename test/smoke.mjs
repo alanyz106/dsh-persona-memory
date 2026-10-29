@@ -1096,6 +1096,152 @@ check('migration skips an already-canonical file', migNoop.migrated === false &&
   check('reading a populated project registers it', listRegistered(bootRegistry).length === 1);
 }
 
+// 13. background learning boundary: source-tagged transcript + project summary
+//     (regression: the learner used to see AGENTS.md as a USER message and
+//     restate project rules as global facts)
+import { renderProjectContextSummary, renderTranscriptLine, parseFacts as parseFactsAgain } from '../dist/lib/learning.js';
+
+const learnRoot = fs.mkdtempSync(path.join(testDir, 'learn-'));
+fs.mkdirSync(path.join(learnRoot, '.git'));
+fs.mkdirSync(path.join(learnRoot, 'memory'));
+fs.writeFileSync(path.join(learnRoot, 'AGENTS.md'), [
+  '# 项目约定',
+  '- 构建后先 node --check',
+  '',
+  '@memory/build.md — 构建链路',
+  '@memory/pitfalls.md: 已知坑',
+].join('\n'));
+const learnIndex = readIndex(learnRoot);
+
+const summary = renderProjectContextSummary(learnIndex, 1500);
+check('project summary names the root', summary.includes(path.resolve(learnRoot)), summary.slice(0, 60));
+check('project summary carries resident rules', summary.includes('构建后先 node --check'));
+// the index is re-rendered in canonical form, so a `:` separator comes back as `—`
+check('project summary carries index files and summaries',
+  summary.includes('@memory/build.md — 构建链路') && summary.includes('@memory/pitfalls.md — 已知坑'), summary);
+check('project summary lists no topic bodies', !summary.includes('body-should-not-appear'));
+
+const tiny = renderProjectContextSummary(learnIndex, 40);
+check('project summary honours the char limit', tiny.length <= 40, `len=${tiny.length}`);
+check('an over-limit summary is marked truncated', /truncated/.test(tiny), tiny);
+check('a summary of an empty project is empty',
+  renderProjectContextSummary({ root: learnRoot, agentsFile: '', memoryDir: '', exists: false, resident: [], entries: [], orphans: [] }, 1500) === '');
+check('an unbounded summary (limit 0) is not truncated',
+  !/truncated/.test(renderProjectContextSummary(learnIndex, 0)));
+
+// Budget allocation: the index is the coverage map, so a real AGENTS.md's
+// resident prose must not consume the whole budget and silently drop it.
+const fatResident = fs.mkdtempSync(path.join(testDir, 'fat-'));
+fs.mkdirSync(path.join(fatResident, 'memory'), { recursive: true });
+fs.writeFileSync(path.join(fatResident, 'AGENTS.md'), [
+  ...Array.from({ length: 60 }, (_, i) => `- 常驻规则 ${i}：${'细节'.repeat(20)}`),
+  '',
+  '@memory/build.md — 构建链路',
+  '@memory/deploy.md — 部署流程',
+].join('\n'));
+const fatIndex = readIndex(fatResident);
+const fatSummary = renderProjectContextSummary(fatIndex, 1500);
+check('a fat resident block still leaves room for the index',
+  fatSummary.includes('@memory/build.md') && fatSummary.includes('@memory/deploy.md'), fatSummary.slice(-200));
+check('the fat summary still respects the limit', fatSummary.length <= 1500, `len=${fatSummary.length}`);
+check('the fat summary marks the truncation', /truncated/.test(fatSummary));
+check('the fat summary keeps the project root line first',
+  fatSummary.startsWith(`Project root: ${path.resolve(fatResident)}`));
+
+// --- transcript source tagging
+const textMsg = (role, text, kind) => ({ role, content: [{ type: 'text', text }], ...(kind ? { source: { kind } } : {}) });
+const instrLine = renderTranscriptLine(textMsg('user', 'AGENTS.md 内容：构建后先 node --check', 'agent-instructions'));
+check('agent-instructions render as PROJECT-INSTRUCTIONS',
+  instrLine.startsWith('PROJECT-INSTRUCTIONS') && instrLine.includes('do not re-extract'), String(instrLine));
+check('a direct user message renders as USER', renderTranscriptLine(textMsg('user', 'hi')) === 'USER: hi');
+check('an assistant message renders as ASSISTANT', renderTranscriptLine(textMsg('assistant', 'done')) === 'ASSISTANT: done');
+check('runtime-context is skipped', renderTranscriptLine(textMsg('user', 'cwd=/x', 'runtime-context')) === null);
+check('time-context is skipped', renderTranscriptLine(textMsg('user', '<time>now</time>', 'time-context')) === null);
+check('skill-catalog is skipped', renderTranscriptLine(textMsg('user', '<available_skills/>', 'skill-catalog')) === null);
+check('an unknown source kind falls back to USER',
+  renderTranscriptLine(textMsg('user', 'mystery', 'some-future-plugin')) === 'USER: mystery');
+check('a genuine source.kind user renders as USER', renderTranscriptLine(textMsg('user', 'real', 'user')) === 'USER: real');
+check('an empty message renders nothing', renderTranscriptLine(textMsg('user', '   ')) === null);
+
+// --- buildTranscript end-to-end over a fake session
+import { buildTranscript } from '../dist/lib/learning.js';
+const fakeSession = (messages) => ({ deriveMessages: () => messages, id: 'fake' });
+const transcript = buildTranscript(fakeSession([
+  textMsg('user', 'irrelevant runtime noise', 'runtime-context'),
+  textMsg('user', '我更喜欢中文回答'),
+  textMsg('user', 'Updated instructions from: AGENTS.md — 改完先 node --check', 'agent-instructions'),
+  textMsg('assistant', '好的，已记录'),
+]), 2, 6000);
+check('buildTranscript labels sources', /USER: 我更喜欢中文回答/.test(transcript) && /ASSISTANT: 好的/.test(transcript));
+check('buildTranscript tags injected instructions', /PROJECT-INSTRUCTIONS/.test(transcript), transcript);
+check('buildTranscript drops skipped sources', !/irrelevant runtime noise/.test(transcript));
+const clipped = buildTranscript(fakeSession([
+  textMsg('user', 'A'.repeat(100)),
+  textMsg('assistant', 'B'.repeat(100)),
+]), 2, 120);
+check('buildTranscript keeps the tail and drops whole lines', clipped.length <= 130 && clipped.includes('B'.repeat(100)) && !clipped.includes('A'.repeat(100)), String(clipped.length));
+check('buildTranscript survives a broken session', buildTranscript({ deriveMessages: () => { throw new Error('x'); } }, 2, 100) === '');
+
+// --- end-to-end: runLearning's prompt carries the tagged transcript + project summary
+import { registerLifecycleHooks } from '../dist/lib/learning.js';
+const learnStore = createMemoryStore({ dir: path.join(learnRoot, 'global'), limits: BIG_LIMITS });
+let learnPrompts = 0;
+let learnedPrompt = '';
+let learnDone;
+const learnDonePromise = new Promise((res) => { learnDone = res; });
+const learnCtx = {
+  logger: { info() {}, warn() {}, error() {}, debug() {} },
+  llm: {
+    stream(args) {
+      learnPrompts++;
+      learnedPrompt = args.messages[0].content[0].text;
+      return (async function* () {
+        yield { type: 'text-delta', text: 'NONE' };
+        learnDone();
+      })();
+    },
+  },
+  on(_name, cb) {
+    learnCtx.handler = cb;
+  },
+};
+// the session's own LLM route comes from its request/header event
+const learnSession = {
+  id: 'learn-e2e',
+  header: { cwd: learnRoot },
+  events: [{ type: 'request/header', data: { header: { config: { provider: 'p', model: 'm' } } } }],
+  deriveMessages: () => [
+    textMsg('user', '我更喜欢中文回答'),
+    textMsg('user', 'AGENTS.md: 构建后先 node --check', 'agent-instructions'),
+    textMsg('assistant', '好的'),
+  ],
+};
+registerLifecycleHooks(learnCtx, learnStore, {
+  enableSecretScanning: true, correctionDetection: true, correctionPatternDetection: true,
+  correctionHumanOnly: true, correctionRateLimitTurns: 3,
+  learnEnabled: true, learnHumanOnly: true, learnIntervalTurns: 10,
+  learnRecentTurns: 2, learnMaxChars: 6000, learnTimeoutMs: 5000,
+  learnProjectContext: true, learnProjectContextCharLimit: 1500,
+  memoryCharLimit: 1_000_000, autoConsolidate: false,
+}, () => learnRoot);
+// the hook counts turn/end events, so drive one full learning interval
+for (let i = 0; i < 10; i++) learnCtx.handler(learnSession, { type: 'turn/end', data: {} });
+await Promise.race([learnDonePromise, new Promise((r) => setTimeout(r, 3000))]);
+check('the learning call fires once per interval', learnPrompts === 1, `calls=${learnPrompts}`);
+check('the learner prompt carries the project memory section',
+  /Project memory \(already stored/.test(learnedPrompt), learnedPrompt.slice(0, 120));
+check('the learner prompt shows the project index and resident rules',
+  learnedPrompt.includes('@memory/build.md') && learnedPrompt.includes('构建后先 node --check'));
+check('the learner prompt tags injected instructions separately from the user',
+  /PROJECT-INSTRUCTIONS/.test(learnedPrompt) && /USER: 我更喜欢中文回答/.test(learnedPrompt));
+check('the learning run never writes project memory',
+  !fs.existsSync(path.join(learnRoot, 'memory', 'build.md')));
+
+// --- parseFacts regression: the boundary change must not alter parsing
+check('parseFacts still returns the same shape after the learning rewrite',
+  parseFactsAgain('- a\n- b\nNONE\n').join('|') === parseFacts('- a\n- b\nNONE\n').join('|'));
+
+
 // cleanup
 fs.rmSync(testDir, { recursive: true, force: true });
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURES`);

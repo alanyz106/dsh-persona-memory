@@ -9,12 +9,20 @@
  *    `learnIntervalTurns` turns call the session's own LLM route to review
  *    the recent transcript and extract durable facts, saving them via the
  *    store. All writes still pass the content scanner.
+ *
+ * Background learning writes the GLOBAL stores only. Project knowledge is
+ * excluded by design: splitting it into resident rules + topic files needs the
+ * full project context and the main model already does it better through
+ * `project_memory`. To make that exclusion enforceable the learner is shown a
+ * compact summary of the current project's memory (resident rules + index
+ * descriptions) and told to skip anything already covered there.
  */
 import { scanContent } from './secret-scanner.js';
 import { callLlm, latestRoute, sessionEvents, type LlmRoute } from './llm-helper.js';
 import { maybeConsolidate, type ConsolidationConfig } from './consolidate.js';
 import { buildFailureText } from './failures.js';
 import { extractCorrectionDirective, isCorrection } from './correction.js';
+import { renderAgents, readIndex, resolveProjectRoot, type ProjectIndex } from './project-memory.js';
 import { isDerivedSession } from './sessions.js';
 import type { MemoryStore } from './memory-store.js';
 import type { Context } from '@deepseek-ai/cordis';
@@ -31,12 +39,19 @@ declare module '@deepseek-ai/dsh-session/types' {
 
 const LEARNING_SYSTEM_PROMPT = `You are a memory curator for a coding agent that persists long-term persona memory across sessions.
 
-Read the recent conversation transcript and extract durable, factual entries worth remembering later: user preferences and identity facts, project conventions and architecture decisions, environment details, tool quirks, and lessons learned. Skip one-off task details, greetings, and anything already covered by the current memory below.
+Read the recent conversation transcript and extract durable, factual entries worth remembering later in the GLOBAL memory: user preferences and identity facts, environment details, machine/tool quirks, and lessons that hold across repositories, and anything already covered by the current memory below.
+
+Project-specific knowledge is NOT yours to store. Rules, conventions, build/deploy quirks, and architecture decisions that hold only inside one repository belong to that repository's project memory, which the working agent maintains itself. Test every candidate with: "would this still be true in a different repository?" If not, skip it.
 
 Rules:
 - Output ONLY plain lines, one fact per line. No numbering, no bullet markers, no markdown fences, no JSON, no commentary.
 - Keep each fact self-contained and concise (under 300 chars), written in the language of the conversation.
 - Only output NEW facts that are not already in the current memory.
+- The transcript tags each line by source:
+  - \`USER:\` — the human typed it. The only reliable source of user preferences and identity.
+  - \`ASSISTANT:\` — the agent said it. Useful for distilled lessons, but it is not evidence of what the user wants.
+  - \`PROJECT-INSTRUCTIONS: ...\` — workspace instructions the harness injected (AGENTS.md and friends). This text is ALREADY stored in project memory. Never restate any of it as a new fact, and never treat its content as something the user said.
+- "Project memory" below lists what the current repository already stores (resident rules plus one line per topic file). If a candidate fact is already covered there, skip it — do not duplicate it into global memory.
 - If there is nothing worth saving, output the single line: NONE`;
 
 // NOTE: this in-flight guard is intentionally module-scoped — runLearning is a
@@ -61,9 +76,16 @@ export interface LearningConfig extends ConsolidationConfig {
   learnRecentTurns: number;
   learnMaxChars: number;
   learnTimeoutMs: number;
+  /** Show the learner a summary of the project's memory so it can skip duplicates. */
+  learnProjectContext: boolean;
+  /** Character budget for that summary (resident rules + index lines). */
+  learnProjectContextCharLimit: number;
   memoryCharLimit: number;
   autoConsolidate: boolean;
 }
+
+/** Injected by the host: the working directory of the session being learned. */
+export type SessionCwdOf = (session: Session | unknown) => string | null;
 
 /**
  * What this session is allowed to feed back into memory. Derived sessions
@@ -83,7 +105,12 @@ export function sessionCapturePolicy(
   };
 }
 
-export function registerLifecycleHooks(ctx: Context, store: MemoryStore, cfg: LearningConfig): void {
+export function registerLifecycleHooks(
+  ctx: Context,
+  store: MemoryStore,
+  cfg: LearningConfig,
+  cwdOf?: SessionCwdOf,
+): void {
   /** turn counts per session id */
   const turnCounts = new Map<string, number>();
   /** sessions with a pending in-chat correction this turn */
@@ -144,7 +171,7 @@ export function registerLifecycleHooks(ctx: Context, store: MemoryStore, cfg: Le
           const n = (turnCounts.get(session.id) ?? 0) + 1;
           if (n >= cfg.learnIntervalTurns) {
             turnCounts.set(session.id, 0);
-            runLearning(ctx, store, cfg, session).catch((err) =>
+            runLearning(ctx, store, cfg, session, cwdOf).catch((err) =>
               ctx.logger.warn('[dsh-persona-memory] background learning failed: %s', (err as Error | undefined)?.message ?? String(err)),
             );
           } else {
@@ -202,7 +229,13 @@ async function saveCorrection(store: MemoryStore, cfg: LearningConfig, text: str
   console.warn('[dsh-persona-memory] correction save skipped (overflow/conflict): %s', entry.slice(0, 80));
 }
 
-async function runLearning(ctx: Context, store: MemoryStore, cfg: LearningConfig, session: Session): Promise<void> {
+async function runLearning(
+  ctx: Context,
+  store: MemoryStore,
+  cfg: LearningConfig,
+  session: Session,
+  cwdOf?: SessionCwdOf,
+): Promise<void> {
   if (inflight.has(session.id)) return;
   inflight.add(session.id);
   try {
@@ -211,7 +244,18 @@ async function runLearning(ctx: Context, store: MemoryStore, cfg: LearningConfig
     const transcript = buildTranscript(session, cfg.learnRecentTurns, cfg.learnMaxChars);
     if (!transcript) return;
     const current = store.readSync('memory', cfg.learnMaxChars).content;
-    const reply = await callLlm(ctx, route, LEARNING_SYSTEM_PROMPT, `Recent conversation transcript:\n---begin---\n${transcript}\n---end---\n\nCurrent memory:\n${current || '(empty)'}`, cfg.learnTimeoutMs);
+    // What the project already stores, so the learner can skip it instead of
+    // writing the same rules into the global store. Missing project / missing
+    // AGENTS.md / a read failure all collapse to '' (the section is omitted).
+    const projectContext = cfg.learnProjectContext ? projectContextFor(cfg, session, cwdOf) : '';
+    const sections = [
+      `Recent conversation transcript:\n---begin---\n${transcript}\n---end---`,
+      `Current memory:\n${current || '(empty)'}`,
+    ];
+    if (projectContext) {
+      sections.push(`Project memory (already stored in this repository — do NOT re-extract, do NOT duplicate into global memory):\n---begin---\n${projectContext}\n---end---`);
+    }
+    const reply = await callLlm(ctx, route, LEARNING_SYSTEM_PROMPT, sections.join('\n\n'), cfg.learnTimeoutMs);
     const facts = parseFacts(reply);
     for (const fact of facts) {
       if (cfg.enableSecretScanning && scanContent(fact)) continue;
@@ -232,6 +276,16 @@ async function runLearning(ctx: Context, store: MemoryStore, cfg: LearningConfig
     if (facts.length > 0) {
       ctx.logger.info('[dsh-persona-memory] learned %d fact(s) from %s', facts.length, session.id);
     }
+    // Observability: background learning has no visible sink in every
+    // deployment, so record what the run was actually given. `projectChars`
+    // of 0 means the exclusion rule had no evidence to work from.
+    ctx.logger.info(
+      '[dsh-persona-memory] learning run %s: transcript=%d chars, projectContext=%d chars, facts=%d',
+      session.id,
+      transcript.length,
+      projectContext.length,
+      facts.length,
+    );
     // If the learned facts pushed memory over budget, consolidate.
     const stat = await store.stat('memory');
     const limit = cfg.memoryCharLimit;
@@ -247,9 +301,114 @@ async function runLearning(ctx: Context, store: MemoryStore, cfg: LearningConfig
 }
 
 /**
- * @returns bounded recent user/assistant transcript
+ * Project memory as the learner needs to see it: the resident rules and the
+ * `@memory/...` index descriptions — never the topic file bodies. Those are
+ * lazily read by the working model, and pulling them in would blow both
+ * `learnMaxChars` and the point of the split.
+ *
+ * Budget: the index is the coverage map ("this topic is already written down
+ * somewhere"), so it gets first claim on up to `INDEX_RESERVE` of the budget
+ * and the resident prose takes the rest — truncating the tail. The reverse
+ * order loses the index entirely on any repository with a real AGENTS.md,
+ * which is precisely the case the summary exists for.
+ *
+ * @param index parsed AGENTS.md index
+ * @param charLimit budget for the rendered summary; 0/negative = unbounded
+ * @returns the summary, or '' when the project has nothing to summarize
  */
-function buildTranscript(session: Session, recentTurns: number, maxChars: number): string {
+export function renderProjectContextSummary(index: ProjectIndex, charLimit: number): string {
+  const resident = index.resident.join('\n').trim();
+  if (!resident && index.entries.length === 0) return '';
+  const marker = '…(truncated)';
+  const rootLine = `Project root: ${index.root}`;
+  const indexBlock = index.entries.length > 0
+    ? `Topic files (index only — bodies are loaded on demand):\n${renderAgents([], index.entries).trim()}`
+    : '';
+  const residentBlock = resident ? `Resident rules (AGENTS.md):\n${resident}` : '';
+
+  if (charLimit <= 0) {
+    return [rootLine, residentBlock, indexBlock].filter(Boolean).join('\n');
+  }
+  // Spend on the index first, then the resident prose with what is left.
+  const indexAllowance = Math.min(indexBlock.length, Math.floor(charLimit * 0.4));
+  const residentAllowance = charLimit - rootLine.length - indexAllowance - 2; // 2 separator newlines
+  const fit = (block: string, allowance: number): string => {
+    if (!block || allowance <= 0) return '';
+    if (block.length <= allowance) return block;
+    if (allowance <= marker.length) return '';
+    return block.slice(0, allowance - marker.length) + marker;
+  };
+  const text = [rootLine, fit(residentBlock, residentAllowance), fit(indexBlock, indexAllowance)]
+    .filter(Boolean)
+    .join('\n');
+  // A budget too small for the structure still has to respect the limit.
+  if (text.length <= charLimit) return text;
+  if (charLimit <= marker.length) return text.slice(0, charLimit);
+  return text.slice(0, charLimit - marker.length) + marker;
+}
+
+/**
+ * Resolve the session's project and summarize its memory.
+ *
+ * Every failure mode — no cwd, no project, unreadable AGENTS.md, a bug in the
+ * renderer — must degrade to '' so background learning still runs. Learning
+ * without the exclusion evidence is the old behavior; learning not running at
+ * all is worse.
+ */
+function projectContextFor(cfg: LearningConfig, session: Session, cwdOf?: SessionCwdOf): string {
+  if (!cwdOf) return '';
+  try {
+    const cwd = cwdOf(session);
+    if (!cwd) return '';
+    const root = resolveProjectRoot(cwd);
+    if (!root) return '';
+    const summary = renderProjectContextSummary(readIndex(root), cfg.learnProjectContextCharLimit);
+    return summary;
+  } catch {
+    return '';
+  }
+}
+
+/** A message as the transcript renderer needs it (structural, so tests need no Session). */
+export interface TranscriptMessage {
+  role: string;
+  content: readonly { type: string; text?: string }[];
+  source?: { kind?: string };
+}
+
+/** Synthetic context kinds with no learning value — pure system noise. */
+const SKIPPED_SOURCES = new Set(['runtime-context', 'skill-catalog', 'time-context']);
+
+/**
+ * Render one transcript line, tagged by where the text actually came from.
+ *
+ * The harness injects whole files (AGENTS.md) as **user messages**, so a
+ * role-only rendering makes project instructions look like something the user
+ * said — which is exactly how the learner came to restate project rules as
+ * global facts. Source kinds are merge-extensible, so unknown kinds fall
+ * through to USER rather than being dropped.
+ *
+ * @returns `[label, text]`, or null when the message carries nothing worth showing
+ */
+export function renderTranscriptLine(msg: TranscriptMessage): string | null {
+  const kind = msg.source?.kind;
+  if (kind && SKIPPED_SOURCES.has(kind)) return null;
+  const text = msg.content
+    .filter((b) => b.type === 'text')
+    .map((b) => b.text ?? '')
+    .join(' ')
+    .trim();
+  if (!text) return null;
+  if (kind === 'agent-instructions') {
+    return `PROJECT-INSTRUCTIONS (already stored in project memory — do not re-extract): ${text}`;
+  }
+  return `${msg.role === 'assistant' ? 'ASSISTANT' : 'USER'}: ${text}`;
+}
+
+/**
+ * @returns bounded recent user/assistant transcript, tagged by source
+ */
+export function buildTranscript(session: Session, recentTurns: number, maxChars: number): string {
   let messages: ReturnType<Session['deriveMessages']>;
   try {
     messages = session.deriveMessages();
@@ -258,20 +417,21 @@ function buildTranscript(session: Session, recentTurns: number, maxChars: number
   }
   // tail slice: roughly 3 events per turn window
   const limit = Math.max(1, Math.floor(recentTurns * 3));
-  const tail = messages.slice(-limit);
+  const tail = messages.slice(-limit) as unknown as readonly TranscriptMessage[];
   const lines: string[] = [];
   for (const msg of tail) {
     if (msg.role !== 'user' && msg.role !== 'assistant') continue;
-    const text = msg.content
-      .filter((b) => b.type === 'text')
-      .map((b) => b.text)
-      .join(' ')
-      .trim();
-    if (!text) continue;
-    lines.push(`${msg.role === 'user' ? 'USER' : 'ASSISTANT'}: ${text}`);
+    const line = renderTranscriptLine(msg);
+    if (line) lines.push(line);
   }
   let out = lines.join('\n');
-  if (out.length > maxChars) out = out.slice(out.length - maxChars);
+  if (maxChars > 0 && out.length > maxChars) {
+    // Drop whole leading lines rather than slicing mid-line: a cut label
+    // ("SISTANT: …") reads as an unlabeled fact and loses its provenance.
+    while (lines.length > 1 && lines.join('\n').length > maxChars) lines.shift();
+    out = lines.join('\n');
+    if (out.length > maxChars) out = out.slice(out.length - maxChars);
+  }
   return out;
 }
 
