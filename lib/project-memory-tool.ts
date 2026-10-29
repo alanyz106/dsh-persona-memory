@@ -9,7 +9,8 @@
  *
  * The index in AGENTS.md is the contract. Every mutation keeps it in sync:
  * `write`/`append` ensure a pointer line exists, `delete` removes it, and the
- * resident block is edited only through `add_resident`/`remove_resident`.
+ * resident block is edited through `add_resident`/`remove_resident` or the
+ * line-level `update`.
  */
 import { HarnessError } from '@deepseek-ai/dsh-llm';
 import { defineTool, type ToolRunContext } from '@deepseek-ai/dsh-tools';
@@ -23,6 +24,7 @@ import {
   readMemoryFile,
   writeMemoryFile,
   appendMemoryFile,
+  updateMemoryFile,
   deleteMemoryFile,
   mutateIndex,
   searchMemoryFiles,
@@ -167,7 +169,8 @@ export function registerProjectMemoryTool(ctx: Context, deps: ProjectMemoryDeps)
         + 'Use this instead of the global `memory` tool for anything specific to this codebase: architecture, build/deploy steps, '
         + 'gotchas, decisions, environment quirks. '
         + 'Actions: list (index + orphans + budget usage), read (load one topic file), write (create/replace a topic file and index it), '
-        + 'append (add a section to a topic file), delete (remove a pointer and trash its file), '
+        + 'append (add a section to a topic file), update (replace one line matched by substring — in a topic file when `file` is given, else in the resident zone), '
+        + 'delete (remove a pointer and trash its file), '
         + 'search (substring search across topic files), add_resident / remove_resident (edit the always-on rules), '
         + 'migrate (convert a prose AGENTS.md into this shape), guide (full authoring guide: what belongs in each zone, examples, anti-patterns). '
         + 'Rule of thumb: what you must not get wrong goes resident; what you look up while doing the work goes in a topic file. '
@@ -176,12 +179,12 @@ export function registerProjectMemoryTool(ctx: Context, deps: ProjectMemoryDeps)
         action: {
           type: 'string',
           required: true,
-          enum: ['list', 'read', 'write', 'append', 'delete', 'search', 'add_resident', 'remove_resident', 'migrate', 'guide'],
+          enum: ['list', 'read', 'write', 'append', 'update', 'delete', 'search', 'add_resident', 'remove_resident', 'migrate', 'guide'],
           description: 'What to do. `guide` takes no other argument.',
         },
         file: {
           type: 'string',
-          description: 'Topic file, e.g. `memory/build.md` or `build.md`. Required for read/write/append/delete.',
+          description: 'Topic file, e.g. `memory/build.md` or `build.md`. Required for read/write/append/update/delete.',
         },
         summary: {
           type: 'string',
@@ -189,11 +192,11 @@ export function registerProjectMemoryTool(ctx: Context, deps: ProjectMemoryDeps)
         },
         content: {
           type: 'string',
-          description: 'Full file content for write, appended section for append, rule line(s) for add_resident.',
+          description: 'Full file content for write, appended section for append, replacement line(s) for update, rule line(s) for add_resident.',
         },
         match: {
           type: 'string',
-          description: 'Substring locating a resident line to remove (remove_resident).',
+          description: 'Substring locating the entry to update or delete (case-insensitive, first match wins) — resident line for remove_resident / update without `file`, line in the topic file for update with `file`.',
         },
         query: {
           type: 'string',
@@ -282,6 +285,41 @@ export function registerProjectMemoryTool(ctx: Context, deps: ProjectMemoryDeps)
             deps.onWrite?.(root);
             logProjectWrite(ctx, exec, 'append', root, rel, `chars=${appended.chars}`);
             return { file: rel, chars: appended.chars, limit: cfg.projectFileCharLimit } as unknown as Record<string, JsonValue>;
+          }
+
+          case 'update': {
+            // One action for both zones: with `file` it edits a line inside a
+            // topic file; without it, a resident AGENTS.md rule. This replaces
+            // the remove_resident + add_resident two-step for stale rules.
+            const match = requireText(args.match, 'match');
+            const content = requireText(args.content, 'content');
+            rejectBlocked(content, cfg.enableSecretScanning);
+            await autoMigrate(root, index, route);
+            if (typeof args.file === 'string' && args.file.trim() !== '') {
+              const rel = safeMemoryRel(root, args.file);
+              if (!rel) throw new HarnessError(`非法记忆文件名：${args.file}`, 'PROJECT_INVALID_FILE');
+              const updated = await updateMemoryFile(root, rel, match, content, cfg.projectFileCharLimit);
+              if (!updated.ok) throw new HarnessError(updated.error, 'PROJECT_UPDATE_FAILED');
+              deps.onWrite?.(root);
+              logProjectWrite(ctx, exec, 'update', root, rel, `${match} -> ${content}`);
+              return { file: rel, chars: updated.chars } as unknown as Record<string, JsonValue>;
+            }
+            let replaced = 0;
+            const result = await mutateIndex(root, ({ resident, entries }) => {
+              const next = resident.map((line) => {
+                if (replaced === 0 && line.toLowerCase().includes(match.toLowerCase())) {
+                  replaced++;
+                  return content.replace(/\r\n/g, '\n');
+                }
+                return line;
+              });
+              if (replaced === 0) return { error: `没有匹配「${match}」的常驻行` };
+              return { resident: next, entries };
+            }, budget);
+            if (!result.ok) throw new HarnessError(result.error, 'PROJECT_RESIDENT_UPDATE_FAILED');
+            deps.onWrite?.(root);
+            logProjectWrite(ctx, exec, 'update', root, '', `${match} -> ${content}`);
+            return { replaced, chars: residentChars(readIndex(root).resident) } as unknown as Record<string, JsonValue>;
           }
 
           case 'delete': {

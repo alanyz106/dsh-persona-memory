@@ -410,6 +410,45 @@ export async function appendMemoryFile(
 }
 
 /**
+ * Replace the first line of one memory file whose text contains `match`
+ * (case-insensitive) with `content` — the topic-file counterpart of the
+ * global store's update. `content` may span several lines; the replacement
+ * takes the matched line's place verbatim.
+ *
+ * The file must already exist and contain the match: update edits, it never
+ * creates (that is `write`/`append`'s job).
+ */
+export async function updateMemoryFile(
+  root: string,
+  rel: string,
+  match: string,
+  content: string,
+  maxChars?: number,
+): Promise<{ ok: true; file: string; chars: number } | { ok: false; error: string }> {
+  const safe = safeMemoryRel(root, rel);
+  if (!safe) return { ok: false, error: `非法记忆文件名：${String(rel)}` };
+  const file = path.join(root, ...safe.split('/'));
+  return withLock(file, async () => {
+    let existing = '';
+    try {
+      existing = fs.readFileSync(file, 'utf8');
+    } catch {
+      return { ok: false as const, error: `${safe} 不存在` };
+    }
+    const lines = existing.split('\n');
+    const index = lines.findIndex((l) => l.toLowerCase().includes(match.toLowerCase()));
+    if (index < 0) return { ok: false as const, error: `没有匹配「${match}」的行` };
+    lines[index] = content.replace(/\r\n/g, '\n');
+    const next = lines.join('\n');
+    if (maxChars && next.length > maxChars) {
+      return { ok: false as const, error: `单个记忆文件超上限（${next.length} > ${maxChars} 字符）：请先精简或拆分主题文件` };
+    }
+    await writeAtomic(file, next);
+    return { ok: true as const, file: safe, chars: next.length };
+  });
+}
+
+/**
  * Delete one memory file by moving it into `memory/.trash/` (recoverable).
  *
  * @returns the trash path, or an error when the file does not exist

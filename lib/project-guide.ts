@@ -109,7 +109,7 @@ const GUIDE_BODY: readonly string[] = [
   '1. 先看现状：`project_memory list`（索引 + 孤儿文件 + 各区用量）。',
   '2. 空项目起步：先 `write` 1–2 个主题文件（如 `memory/build.md`、`memory/pitfalls.md`），再 `add_resident` 加 3–8 条硬约束。别反过来——先把常驻区塞满会让你舍不得删。',
   '3. 每次学到东西：同主题 `append`；新主题才 `write`；只影响「下次怎么做」的一句话才进常驻区。',
-  '4. 规则失效：`remove_resident` 按子串删掉旧行再 `add_resident` 写新的，细节沉进主题文件。',
+  '4. 规则失效：`update`（不给 file）按子串定位常驻行并就地替换，主题文件同理给 `file`；细节沉进主题文件。',
   '5. 已有散文 AGENTS.md：走 `migrate`（先 `apply: false` 预览计划），它按标题保全校验拆分，原文另存 `AGENTS.md.bak-<时间戳>`。',
   '6. 路径只能是 `memory/**.md`，`..`、绝对路径、dotfile 一律被拒；写入前过内容扫描，凭据 / 提示注入载荷会被拦下。',
   '',

@@ -28,7 +28,7 @@
 | 功能 | 说明 |
 |---|---|
 | `memory` 工具 | `read` / `add` / `update` / `delete` / `rewrite`；`which` 选 memory/user/failure（全局记忆） |
-| `project_memory` 工具 | `list` / `read` / `write` / `append` / `delete` / `search` / `add_resident` / `remove_resident` / `migrate` / `guide`；作用域固定为当前会话的项目，无 project 参数（防任意路径写） |
+| `project_memory` 工具 | `list` / `read` / `write` / `append` / `update` / `delete` / `search` / `add_resident` / `remove_resident` / `migrate` / `guide`；作用域固定为当前会话的项目，无 project 参数（防任意路径写） |
 | 写法指南内置 | 每请求注入 4 条「两区划分 + 何时读/写」要点（约 330 字符）；完整写法指南（分区判据、流程、真实 AGENTS.md 示例、反模式）经 `project_memory guide` 按需取，管理页也能看 |
 | `memory_search`（混合检索，全局记忆） | 优先 **FTS5 + 语义向量（RRF 融合）**：FTS5 全文索引（`<dir>/.memory-index.sqlite`，mtime 自动重建）+ 向量索引（`vectorIndexDir` 下 `.memory-vec.sqlite`，只存 embedding、指纹增量同步、纯 JS 余弦）；向量未启用时走 FTS5，SQLite 不可用时回退子串扫描；结果始终 ≤`searchMaxResults` 条、只进工具输出，注入成本不随检索方式增加 |
 | 用量提示 | 所有 `memory` 操作返回用量百分比；达 90%（`usageNudgeThreshold`）提醒用 `rewrite` 合并 |
@@ -115,7 +115,7 @@
 |---|---|
 | `memory` | 全局记忆：`read` / `add` / `update` / `delete` / `rewrite`，`which` 选 `memory` / `user` / `failure`；failure 支持 `category` / `failure_reason` / `corrected_to` |
 | `memory_search` | 全局记忆检索：`query` + 可选 `which`（`memory`/`user`/`failure`/`all`） |
-| `project_memory` | 项目记忆：`list` / `read` / `write` / `append` / `delete` / `search` / `add_resident` / `remove_resident` / `migrate` / `guide`；作用域为当前项目 |
+| `project_memory` | 项目记忆：`list` / `read` / `write` / `append` / `update` / `delete` / `search` / `add_resident` / `remove_resident` / `migrate` / `guide`；作用域为当前项目 |
 | `/standing` | 列出常驻指令 |
 | `/standing add <文本>` | 钉住一条常驻指令 |
 | `/standing remove <n>` | 按 1 起编号移除 |
@@ -294,7 +294,7 @@ file: 安装是真实副本——改代码后须重新构建、`dsh plugin --pro
 
 ### 工具：`project_memory`
 
-作用域固定为当前会话的项目（**没有 `project` 参数**——能任意指名项目就能任意写路径）。`list` / `read` / `write` / `append` / `delete` / `search` / `add_resident` / `remove_resident` / `migrate` / `guide`。写入自动维护索引行：新建文件补一行，改描述更新该行，删除文件同时移除指针并把文件移进 `memory/.trash/`。
+作用域固定为当前会话的项目（**没有 `project` 参数**——能任意指名项目就能任意写路径）。`list` / `read` / `write` / `append` / `update` / `delete` / `search` / `add_resident` / `remove_resident` / `migrate` / `guide`。写入自动维护索引行：新建文件补一行，改描述更新该行，删除文件同时移除指针并把文件移进 `memory/.trash/`。`update` 按子串就地替换一行：给 `file` 改主题文件行，不给则改常驻区行（取代 remove_resident + add_resident 两步）。
 
 ### 写法指南（内置 prompt）
 

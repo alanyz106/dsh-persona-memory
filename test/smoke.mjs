@@ -583,6 +583,20 @@ const addedResident = await projTool.execute({ action: 'add_resident', content: 
 check('project_memory add_resident writes the resident block', addedResident.added === 1 && readIndex(toolProjRoot).resident.includes('- 构建前先跑 npm run build'));
 const removedResident = await projTool.execute({ action: 'remove_resident', match: '先跑 npm run build' }, execStub);
 check('project_memory remove_resident drops the line', removedResident.removed === 1 && readIndex(toolProjRoot).resident.length === 0);
+// update (resident): one-step replace of a stale rule, then a not-found error path
+const addedResident2 = await projTool.execute({ action: 'add_resident', content: '- 提交前必须全绿' }, execStub);
+check('project_memory add_resident seeds the update test', addedResident2.added === 1);
+const updatedResident = await projTool.execute({ action: 'update', match: '提交前必须全绿', content: '- 提交前必须全绿（typecheck + smoke）' }, execStub);
+check('project_memory update rewrites a resident line in place',
+  updatedResident.replaced === 1 && readIndex(toolProjRoot).resident.includes('- 提交前必须全绿（typecheck + smoke）'));
+const updateResidentMiss = await projTool.execute({ action: 'update', match: '不存在的行', content: 'x' }, execStub).catch((e) => e);
+check('project_memory update errors on missing resident line', updateResidentMiss instanceof Error);
+// update (topic file): same semantics inside memory/*.md
+const updatedTopic = await projTool.execute({ action: 'update', file: 'memory/build.md', match: 'npm run build', content: 'npm run build && npm run typecheck' }, execStub);
+check('project_memory update rewrites a topic-file line',
+  updatedTopic.file === 'memory/build.md' && readMemoryFile(toolProjRoot, 'memory/build.md').includes('npm run build && npm run typecheck'));
+const updateTopicMiss = await projTool.execute({ action: 'update', file: 'memory/build.md', match: '不存在的行', content: 'x' }, execStub).catch((e) => e);
+check('project_memory update errors on missing topic line', updateTopicMiss instanceof Error);
 const searched = await projTool.execute({ action: 'search', query: 'npm build' }, execStub);
 check('project_memory search finds the topic file', searched.matchCount >= 1 && searched.hits[0].file === 'memory/build.md');
 const deletedProj = await projTool.execute({ action: 'delete', file: 'memory/build.md' }, execStub);
