@@ -7,7 +7,7 @@ import { HarnessError } from '@deepseek-ai/dsh-llm';
 import { defineTool, type ToolRunContext } from '@deepseek-ai/dsh-tools';
 import type { JsonValue } from './json-value.js';
 import { maybeConsolidate, type ConsolidationConfig } from './consolidate.js';
-import { buildFailureText } from './failures.js';
+import { buildFailureText, mergeFailureUpdate } from './failures.js';
 import { latestRoute, type LlmRoute } from './llm-helper.js';
 import { scanContent } from './secret-scanner.js';
 import type { MemoryKind, MemoryStore } from './memory-store.js';
@@ -76,7 +76,9 @@ export function registerMemoryTool(
         '(failures and lessons — recent ones are injected every request so mistakes are not repeated), ' +
         'Project-specific knowledge does NOT belong here — use the `project_memory` tool for that. ' +
         'Actions: read (show current memory), add (append one entry), update (replace an entry ' +
-        'whose text contains `match`), delete (remove an entry whose text contains `match`), ' +
+        'whose text contains `match` — for `failure` this is a PARTIAL edit: `content`, ' +
+        '`failure_reason` and `corrected_to` you omit are kept from the existing entry, and `""` clears one), ' +
+        'delete (remove an entry whose text contains `match`), ' +
         'rewrite (replace the whole file — use for consolidation). Entries are free-form single-line ' +
         'blocks; keep each one self-contained and dated in spirit. Never store credentials — writes are scanned.',
       parameters: {
@@ -94,19 +96,19 @@ export function registerMemoryTool(
         category: {
           type: 'string',
           enum: ['failure', 'correction', 'insight', 'preference', 'convention', 'tool-quirk'],
-          description: 'Failure category tag, only meaningful for which=failure add.',
+          description: 'Failure category tag: for which=failure add/update. Omitted on update keeps the current one.',
         },
         failure_reason: {
           type: 'string',
-          description: 'Why it went wrong, only for which=failure add.',
+          description: 'Why it went wrong: for which=failure add/update. Omitted on update keeps the current value; "" clears it.',
         },
         corrected_to: {
           type: 'string',
-          description: 'What was corrected / what to do instead, only for which=failure add.',
+          description: 'What was corrected / what to do instead: for which=failure add/update. Omitted on update keeps the current value; "" clears it.',
         },
         content: {
           type: 'string',
-          description: 'Entry text (for add/update) or full document content (for rewrite).',
+          description: 'Entry text (for add/update) or full document content (for rewrite). Optional on which=failure update to change only the structured fields.',
         },
         match: {
           type: 'string',
@@ -151,13 +153,35 @@ export function registerMemoryTool(
             break;
           }
           case 'update': {
-            const content = requireText(args.content, 'update');
             const match = requireText(args.match, 'update', 'match');
-            rejectBlocked(content, config);
-            result = (await targetStore.update(which, match, content)) as unknown as Record<string, unknown>;
-            logWrite(ctx, exec, 'update', which, result, `${match} -> ${content}`);
+            // For failures, an update is a PARTIAL edit: any of
+            // content / failure_reason / corrected_to that the caller omits is
+            // read back from the existing entry. Before this, `update` rebuilt
+            // the line from `content` alone and every failure lost its
+            // "Failed:" / "Corrected to:" fields.
+            let entry: string;
+            if (which === 'failure') {
+              const existing = await targetStore.findEntry(which, match);
+              if (existing === null) {
+                throw new HarnessError(
+                  `No failure entry matches "${match}" — nothing to update.`,
+                  'MEMORY_ENTRY_NOT_FOUND',
+                );
+              }
+              entry = mergeFailureUpdate(existing, {
+                content: args.content,
+                category: args.category,
+                failureReason: args.failure_reason,
+                correctedTo: args.corrected_to,
+              });
+            } else {
+              entry = requireText(args.content, 'update');
+            }
+            rejectBlocked(entry, config);
+            result = (await targetStore.update(which, match, entry)) as unknown as Record<string, unknown>;
+            logWrite(ctx, exec, 'update', which, result, `${match} -> ${entry}`);
             if (result.overflow) {
-              result = await retryAfterConsolidation(args.action, { content, match }, config, ctx, targetStore, routeFor(exec), which, limit);
+              result = await retryAfterConsolidation(args.action, { content: entry, match }, config, ctx, targetStore, routeFor(exec), which, limit);
             }
             break;
           }

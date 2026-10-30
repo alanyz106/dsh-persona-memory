@@ -102,6 +102,8 @@ export interface StoreSearchHit {
 export interface MemoryStore {
   add(which: MemoryKind, content: string, opts?: { dedupe?: boolean; project?: string | null }): Promise<StoreAddResult & { conflict?: boolean }>;
   update(which: MemoryKind, match: string, content: string): Promise<StoreUpdateResult & { conflict?: boolean }>;
+  /** First entry whose stripped text contains `match` (same rule as update/remove). */
+  findEntry(which: MemoryKind, match: string): Promise<string | null>;
   remove(which: MemoryKind, match: string): Promise<StoreRemoveResult & { conflict?: boolean }>;
   rewrite(which: MemoryKind, content: string): Promise<StoreRewriteResult>;
   read(which: MemoryKind, limit: number): Promise<StoreReadResult>;
@@ -374,6 +376,18 @@ export function createMemoryStore(config: MemoryStoreConfig): MemoryStore {
   }
 
   /**
+   * Return the full text of the first entry whose stripped text contains
+   * `match`, or null. Uses the exact same matching rule as `update` so a caller
+   * can look up an entry and then update it without the two disagreeing.
+   */
+  async function findEntry(which: MemoryKind, match: string): Promise<string | null> {
+    const list = decoded(await readEntries(fileFor(which)));
+    const needle = match.toLowerCase();
+    const hit = list.find((e) => e.text.toLowerCase().includes(needle));
+    return hit ? hit.text : null;
+  }
+
+  /**
    * Replace the first entry whose stripped text contains `match`.
    */
   async function update(which: MemoryKind, match: string, content: string): Promise<StoreUpdateResult & { conflict?: boolean }> {
@@ -503,7 +517,7 @@ export function createMemoryStore(config: MemoryStoreConfig): MemoryStore {
     return { exists: entries.length > 0, entryCount: entries.length };
   }
 
-  return { add, update, remove, rewrite, read, readSync, readRawSync, search, stat, fileFor, listRaw, replaceEntries };
+  return { add, update, findEntry, remove, rewrite, read, readSync, readRawSync, search, stat, fileFor, listRaw, replaceEntries };
 }
 
 /**
