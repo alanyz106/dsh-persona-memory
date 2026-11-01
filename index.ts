@@ -121,6 +121,12 @@ export interface PluginConfig {
   adminAllowedHostsFile: string;
   autoBackupMin: number;
   autoSwitchOnPiLoss: boolean;
+  /**
+   * How many dated snapshots to keep under `memory-backup/history/`.
+   * `0` = latest-only. Every backup run (manual or periodic) writes one
+   * snapshot, so this is a rolling window (default 14).
+   */
+  backupKeep: number;
   /** Write the plugin's log lines to a file under <dshHome>/logs/. */
   fileLogEnabled: boolean;
   /** Log file path; empty = <dshHome>/logs/persona-memory.log. */
@@ -334,6 +340,8 @@ export function apply(ctx: Context, config?: Record<string, unknown>): void {
     // auto-protect: periodic backup (minutes; 0=off) + Pi-loss fallback
     autoBackupMin: 60,
     autoSwitchOnPiLoss: true,
+    // 历史快照保留份数（每次备份一份，等于滚动窗口；0=只留 latest/）
+    backupKeep: 14,
     // 文件日志：cordis logger 默认只有内存缓冲，本部署没有 console exporter，
     // info 级日志不落盘。开一个文件 sink 才能事后取证「记忆是谁改的」。
     fileLogEnabled: true,
@@ -442,8 +450,9 @@ export function apply(ctx: Context, config?: Record<string, unknown>): void {
       };
     });
 
-    // 自动保护：定时备份（autoBackupMin 分钟一次，只保留最新一份）+ Pi
-    // 记忆丢失自动切换（Pi 的 MEMORY.md 曾存在但消失 → 切到本地 + 恢复）。
+    // 自动保护：定时备份（autoBackupMin 分钟一次，latest/ 覆盖一份 + 按
+    // backupKeep 留带日期的历史快照）+ Pi 记忆丢失自动切换（Pi 的 MEMORY.md
+    // 曾存在但消失 → 切到本地 + 从最新备份恢复）。
     // ctx.timer 是 Cordis 提供的 timer 服务，宿主侧可用；兜底 node setInterval。
     const timerService = ctx.get('timer');
     const disposer = startAutoProtect({

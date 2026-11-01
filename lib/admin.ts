@@ -80,8 +80,25 @@ export const BACKUP_BASE = path.join(os.homedir(), '.dsh', 'memory-backup');
 export const BACKUP_LATEST = path.join(BACKUP_BASE, 'latest');
 /** Dated snapshots, so an accidental delete is recoverable (see `pruneSnapshots`). */
 export const BACKUP_HISTORY = path.join(BACKUP_BASE, 'history');
-/** How many dated snapshots to keep. */
+/** How many dated snapshots to keep when `backupKeep` is not configured. */
 export const BACKUP_KEEP = 14;
+
+/**
+ * Resolve how many dated snapshots to retain.
+ *
+ * Every backup run (manual or periodic) writes one dated snapshot, so this is
+ * effectively a rolling window: the default 14 with the default hourly tick
+ * means "the last 14 hours". `0` disables the dated copy entirely (latest-only,
+ * the pre-0.3.2 behaviour); negative/garbage values fall back to the default.
+ */
+export function backupKeep(cfg: Record<string, unknown>): number {
+  const v = cfg.backupKeep;
+  if (typeof v === 'number' && Number.isFinite(v)) return Math.max(0, Math.floor(v));
+  if (typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v))) {
+    return Math.max(0, Math.floor(Number(v)));
+  }
+  return BACKUP_KEEP;
+}
 
 /** Where one backup run writes: the live mirror plus an optional dated copy. */
 export interface BackupPaths {
@@ -89,17 +106,23 @@ export interface BackupPaths {
   history?: string;
 }
 
+/** Backup root actually in use: `cfg.backupDir` override, else the DSH home. */
+export function backupBase(cfg: Record<string, unknown>): string {
+  return typeof cfg.backupDir === 'string' && cfg.backupDir.trim()
+    ? cfg.backupDir.trim()
+    : BACKUP_BASE;
+}
+
 /**
  * Resolve the backup destination.
  *
  * `cfg.backupDir` exists so tests never touch the real `~/.dsh/memory-backup`
  * (a smoke run used to deposit a hundred throwaway project snapshots there).
- * `history: false` skips the dated copy (used by the periodic auto-backup).
+ * `history: false` skips the dated copy even when `backupKeep` would allow it;
+ * `backupAll` also skips it when `backupKeep` is 0.
  */
 export function backupPaths(cfg: Record<string, unknown>, opts: { history?: boolean } = {}): BackupPaths {
-  const base = typeof cfg.backupDir === 'string' && cfg.backupDir.trim()
-    ? cfg.backupDir.trim()
-    : BACKUP_BASE;
+  const base = backupBase(cfg);
   const paths: BackupPaths = { latest: path.join(base, 'latest') };
   if (opts.history !== false) {
     const historyRoot = path.join(base, 'history');
@@ -399,7 +422,8 @@ export const CFG_SCHEMA: SchemaField[] = [
   { key: 'embeddingRemoteHost', type: 'string', label: '下载源镜像', group: '向量', help: '大陆可用 https://hf-mirror.com' },
   { key: 'adminProfile', type: 'string', label: '配置写回 profile', group: '管理', help: '默认 web' },
   { key: 'adminAllowedHosts', type: 'string', label: '管理接口允许的额外主机', group: '管理', help: '隧道/反代时填公网域名，多个用逗号分隔；仍要求连接来自本机回环' },
-  { key: 'autoBackupMin', type: 'number', label: '自动备份间隔（分钟）', group: '备份', help: '0=关闭；默认 60；只保留最新一份' },
+  { key: 'autoBackupMin', type: 'number', label: '自动备份间隔（分钟）', group: '备份', help: '0=关闭；默认 60。每次备份写 latest/ 覆盖一份，并按「历史快照保留份数」留带日期的快照' },
+  { key: 'backupKeep', type: 'number', label: '历史快照保留份数', group: '备份', help: '默认 14（配合默认 60 分钟间隔约等于最近 14 小时）；0=只保留 latest/ 一份；每份都可在管理页单独恢复' },
   { key: 'fileLogEnabled', type: 'bool', label: '文件日志', group: '管理', help: '把插件日志（含每次记忆写入的审计行）写到 <dshHome>/logs/persona-memory.log；默认开' },
   { key: 'fileLogPath', type: 'string', label: '日志文件路径', group: '管理', help: '留空用默认 <dshHome>/logs/persona-memory.log' },
   { key: 'autoSwitchOnPiLoss', type: 'bool', label: 'Pi 丢失自动切换', group: '备份', help: 'Pi 记忆消失时自动切到本地并恢复' },
@@ -420,7 +444,7 @@ export const CFG_DEFAULTS: Record<string, unknown> = {
   projectIndexCharLimit: 4000, projectAutoMigrate: true, projectBootstrapHint: true,
   memoryFtsEnabled: true, vectorEnabled: false, embeddingProvider: 'remote', embeddingModel: 'text-embedding-3-small',
   embeddingRemoteHost: 'https://huggingface.co', adminProfile: 'web', adminAllowedHosts: '',
-  autoBackupMin: 60, autoSwitchOnPiLoss: true,
+  autoBackupMin: 60, autoSwitchOnPiLoss: true, backupKeep: 14,
   fileLogEnabled: true, fileLogPath: '',
 };
 
@@ -538,16 +562,100 @@ export function updateSectionConfig(content: string, id: string, cfg: Record<str
 
 // ------------------------------------------------------------- backup
 
-/** List current backup snapshots (single latest dir). */
-export function listBackups(): Array<{ name: string; files: number }> {
+/** One entry in the backup list shown by the admin page. */
+export interface BackupSnapshotInfo {
+  /** `latest` for the live mirror, otherwise the dated snapshot dir name. */
+  name: string;
+  /** Live mirror vs a dated snapshot under `history/`. */
+  kind: 'latest' | 'history';
+  /** Files in the snapshot (recursive: global stores + per-project memory). */
+  files: number;
+  /** Snapshot creation time, ISO string (dir mtime for `latest`). */
+  mtime: string;
+  /** Always true — both kinds are valid restore sources. */
+  restorable: boolean;
+}
+
+/** Recursively count files under `dir` (missing dir = 0). */
+function countFiles(dir: string): number {
+  let entries: fs.Dirent[];
   try {
-    const names = fs.readdirSync(BACKUP_LATEST, { withFileTypes: true })
-      .filter((e) => e.isFile())
-      .map((e) => e.name);
-    return [{ name: 'latest', files: names.length }];
+    entries = fs.readdirSync(dir, { withFileTypes: true });
   } catch {
-    return [];
+    return 0;
   }
+  let count = 0;
+  for (const entry of entries) {
+    if (entry.isDirectory()) count += countFiles(path.join(dir, entry.name));
+    else if (entry.isFile()) count++;
+  }
+  return count;
+}
+
+/** ISO mtime of a path, or '' when it cannot be stat'ed. */
+function mtimeIso(target: string): string {
+  try {
+    return fs.statSync(target).mtime.toISOString();
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * List restore sources: the live mirror first, then dated snapshots newest
+ * first. Every `history/<stamp>` directory is a full snapshot, so any of them
+ * can be restored — not just `latest` (see `resolveSnapshotDir`).
+ */
+export function listBackups(cfg: Record<string, unknown> = {}): BackupSnapshotInfo[] {
+  const base = backupBase(cfg);
+  const out: BackupSnapshotInfo[] = [];
+  const latest = path.join(base, 'latest');
+  if (fs.existsSync(latest)) {
+    out.push({ name: 'latest', kind: 'latest', files: countFiles(latest), mtime: mtimeIso(latest), restorable: true });
+  }
+  const history = path.join(base, 'history');
+  let stamps: string[] = [];
+  try {
+    stamps = fs.readdirSync(history, { withFileTypes: true })
+      .filter((e) => e.isDirectory())
+      .map((e) => e.name)
+      .sort()
+      .reverse();  // ISO-ish stamp names sort chronologically
+  } catch {
+    stamps = [];
+  }
+  for (const name of stamps) {
+    out.push({ name, kind: 'history', files: countFiles(path.join(history, name)), mtime: mtimeIso(path.join(history, name)), restorable: true });
+  }
+  return out;
+}
+
+/**
+ * Resolve a snapshot *name* (never a path) to its directory.
+ *
+ * The admin API must not accept a filesystem path from the browser — that
+ * would turn "restore a backup" into "read any directory into the memory
+ * files". So the name is matched against the actual directory listing
+ * instead of being joined onto the backup root.
+ *
+ * @returns the absolute snapshot dir, or null when the name is unknown
+ */
+export function resolveSnapshotDir(cfg: Record<string, unknown>, name: string): string | null {
+  const base = backupBase(cfg);
+  if (!name || name === 'latest') {
+    const latest = path.join(base, 'latest');
+    return fs.existsSync(latest) ? latest : null;
+  }
+  const history = path.join(base, 'history');
+  let stamps: string[];
+  try {
+    stamps = fs.readdirSync(history, { withFileTypes: true })
+      .filter((e) => e.isDirectory())
+      .map((e) => e.name);
+  } catch {
+    return null;
+  }
+  return stamps.includes(name) ? path.join(history, name) : null;
 }
 
 /** @returns whether the copy happened */
@@ -588,21 +696,34 @@ async function copyTree(src: string, dst: string, skipDots = true): Promise<numb
 }
 
 /**
- * Backup all memory into latest/ (overwrite).
+ * Backup all memory into latest/ (an exact mirror) plus a dated history snapshot.
  *
  * Global stores are flat files; project memory now lives inside each
  * repository, so it is snapshotted as `latest/projects/<name>/{AGENTS.md,memory/**}`
  * driven by the registry (`.trash` and dot-entries are skipped — trash is
  * intentionally excluded from backups).
+ *
+ * `latest/` is REPLACED, not merged into. Overwriting file-by-file looked
+ * cheaper but left ghosts behind: a project that left the registry, a deleted
+ * topic file, or a fixture from an aborted test stayed in `latest/` forever,
+ * so `latest/` drifted away from "what memory looks like right now" (and its
+ * file count no longer matched a history snapshot of the same instant). The
+ * swap is atomic-ish — build the mirror in a sibling temp dir, then rename it
+ * into place — so a crash mid-backup never leaves `latest/` half-written.
+ *
+ * Retention: `backupKeep` (default `BACKUP_KEEP` = 14) caps how many dated
+ * snapshots survive; `0` turns the dated copy off and leaves only `latest/`.
  */
 export async function backupAll(
   cfg: Record<string, unknown>,
   opts: { history?: boolean } = {},
 ): Promise<{ ok: boolean; message: string }> {
   const dir = resolveMemoryDir(cfg);
-  const paths = backupPaths(cfg, opts);
-  let count = 0;
-  const writeSnapshot = async (root: string): Promise<void> => {
+  const keep = backupKeep(cfg);
+  const withHistory = opts.history !== false && keep > 0;
+  const paths = backupPaths(cfg, { history: withHistory });
+  const writeSnapshot = async (root: string): Promise<number> => {
+    let count = 0;
     for (const name of MEMORY_FILES) {
       if (await copyIfExists(path.join(dir, name), path.join(root, name))) count++;
     }
@@ -612,19 +733,37 @@ export async function backupAll(
       if (await copyIfExists(path.join(project.root, 'AGENTS.md'), path.join(target, 'AGENTS.md'))) count++;
       count += await copyTree(path.join(project.root, 'memory'), path.join(target, 'memory'));
     }
+    return count;
   };
-  await writeSnapshot(paths.latest);
-  if (paths.history) {
-    await writeSnapshot(paths.history);
-    pruneSnapshots(path.dirname(paths.history));
+  // Build the mirror beside `latest/`, then swap. `latest/` itself is only
+  // touched by the two renames, so an interrupted run leaves the previous
+  // snapshot intact.
+  const staging = `${paths.latest}.staging-${process.pid}-${Math.random().toString(36).slice(2)}`;
+  const retired = `${paths.latest}.retired-${process.pid}-${Math.random().toString(36).slice(2)}`;
+  let count: number;
+  try {
+    fs.mkdirSync(staging, { recursive: true });
+    count = await writeSnapshot(staging);
+    if (fs.existsSync(paths.latest)) fs.renameSync(paths.latest, retired);
+    fs.renameSync(staging, paths.latest);
+  } finally {
+    fs.rmSync(staging, { recursive: true, force: true });
   }
-  const note = paths.history ? `，历史快照 ${path.basename(paths.history)}` : '';
+  fs.rmSync(retired, { recursive: true, force: true });
+  let note = '';
+  if (paths.history) {
+    const historyCount = await writeSnapshot(paths.history);
+    pruneSnapshots(path.dirname(paths.history), keep);
+    note = `，历史快照 ${path.basename(paths.history)}（${historyCount} 个文件，保留最近 ${keep} 份）`;
+  }
   return { ok: true, message: `备份完成（${count} 个文件）→ ${paths.latest}${note}` };
 }
 
 /**
- * Restore from latest backup.
+ * Restore memory from a backup snapshot.
+ *
  * @param targetDir override destination (defaults to resolveMemoryDir(cfg))
+ * @param snapshot snapshot dir; omit to restore from `latest/`
  * @returns number of restored files
  */
 export async function restoreFromLatest(
@@ -884,8 +1023,9 @@ export function makeAdminRoutes(deps: AdminRouteDeps): WebRoute[] {
       which: String(dir).includes('.pi') ? 'pi-shared' : 'dsh-only',
       config: currentConfig(),
       schema: CFG_SCHEMA,
-      backupDir: BACKUP_BASE,
-      backups: listBackups(),
+      backupDir: backupBase(cfg),
+      backups: listBackups(cfg),
+      backupKeep: backupKeep(cfg),
       stores,
       standing: standingInfo,
       indexes: {
@@ -1217,9 +1357,24 @@ export function makeAdminRoutes(deps: AdminRouteDeps): WebRoute[] {
     { kind: 'exact', path: '/api/persona-memory/restoreLatest', handler: async (req: IncomingMessage, res: ServerResponse) => {
       if (!guard(req, res, 'POST')) return;
       try {
-        const count = await restoreFromLatest(cfg);
-        log(`admin: restored ${count} files from latest backup`);
-        writeJson(res, 200, { ok: true, message: `已从最新备份恢复 ${count} 个文件 → ${resolveMemoryDir(cfg)}` });
+        // `snapshot` is a NAME (`latest` or a history dir stamp), resolved
+        // against the real listing — a path from the browser is never joined
+        // onto the backup root. Omitted => latest.
+        const body = await readJsonBody(req);
+        const name = body && typeof body.snapshot === 'string' ? body.snapshot.trim() : '';
+        const from = resolveSnapshotDir(cfg, name || 'latest');
+        if (!from) {
+          writeJson(res, 404, { error: `未知备份快照: ${name || 'latest'}` });
+          return;
+        }
+        const count = await restoreFromLatest(cfg, undefined, from);
+        log(`admin: restored ${count} files from backup ${path.basename(from)}`);
+        writeJson(res, 200, {
+          ok: true,
+          message: `已从备份 ${path.basename(from)} 恢复 ${count} 个文件 → ${resolveMemoryDir(cfg)}`,
+          snapshot: path.basename(from),
+          restored: count,
+        });
       } catch (e) {
         writeJson(res, 500, { error: e instanceof Error ? e.message : String(e) });
       }

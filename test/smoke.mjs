@@ -846,7 +846,10 @@ const permissivePolicy = sessionCapturePolicy(
 check('capture policy can opt derived sessions back in', permissivePolicy.learning === true && permissivePolicy.corrections === true);
 
 // 24. admin backup/restore covers project memory (AGENTS.md + memory/**)
-import { backupAll, restoreFromLatest, makeAdminRoutes, backupPaths, pruneSnapshots } from '../dist/lib/admin.js';
+import {
+  backupAll, restoreFromLatest, makeAdminRoutes, backupPaths, pruneSnapshots,
+  backupKeep, listBackups, resolveSnapshotDir,
+} from '../dist/lib/admin.js';
 const backupMemDir = fs.mkdtempSync(path.join(testDir, 'backupmem-'));
 const backupProjRoot = fs.mkdtempSync(path.join(testDir, 'backupproj-'));
 fs.writeFileSync(path.join(backupMemDir, 'MEMORY.md'), 'global entry <!-- created=2026-01-01, last=2026-01-01 -->\n');
@@ -902,6 +905,116 @@ check('restore brings memory files back', fs.readFileSync(path.join(backupProjRo
     `removed=${removed} left=${fs.readdirSync(path.join(histBase, 'history')).length}`);
 }
 
+// 24c. retention is configurable (backupKeep) and every snapshot is restorable
+{
+  const keepMem = fs.mkdtempSync(path.join(testDir, 'keepmem-'));
+  const keepBase = path.join(testDir, 'keepbackups');
+  fs.writeFileSync(path.join(keepMem, 'MEMORY.md'), 'base <!-- created=2026-01-01, last=2026-01-01 -->\n');
+  check('backupKeep defaults to 14', backupKeep({}) === 14, String(backupKeep({})));
+  check('backupKeep accepts a configured number', backupKeep({ backupKeep: 3 }) === 3);
+  check('backupKeep accepts the string form from the YAML patch', backupKeep({ backupKeep: '5' }) === 5);
+  check('backupKeep clamps negatives to 0', backupKeep({ backupKeep: -2 }) === 0);
+  check('backupKeep ignores garbage', backupKeep({ backupKeep: 'nonsense' }) === 14);
+
+  // keep=2: the third run must evict the oldest dated snapshot, latest stays one.
+  const keepCfg = { dir: keepMem, backupDir: keepBase, backupKeep: 2 };
+  for (let i = 0; i < 3; i++) {
+    fs.writeFileSync(path.join(keepMem, 'MEMORY.md'), `v${i} <!-- created=2026-01-01, last=2026-01-01 -->\n`);
+    await backupAll(keepCfg);
+    await new Promise((r) => setTimeout(r, 1100)); // distinct second-resolution stamps
+  }
+  const histDirs = fs.readdirSync(path.join(keepBase, 'history'));
+  check('backupAll honours the configured retention count', histDirs.length === 2, `left=${histDirs.length}`);
+
+  // keep=0: latest-only, no history dir written.
+  const offCfg = { dir: keepMem, backupDir: path.join(testDir, 'offbackups'), backupKeep: 0 };
+  const offRun = await backupAll(offCfg);
+  check('backupKeep=0 writes no history snapshot',
+    offRun.ok && !fs.existsSync(path.join(testDir, 'offbackups', 'history')) &&
+    fs.existsSync(path.join(testDir, 'offbackups', 'latest', 'MEMORY.md')), offRun.message);
+
+  // The list must expose every snapshot with a timestamp, latest first.
+  const listed = listBackups(keepCfg);
+  check('listBackups lists latest plus every history snapshot', listed.length === 3,
+    JSON.stringify(listed.map((b) => b.name)));
+  check('listBackups puts latest first and marks it as such',
+    listed[0].name === 'latest' && listed[0].kind === 'latest' && listed[0].restorable === true);
+  check('every history row carries a timestamp', listed.slice(1)
+    .every((b) => b.kind === 'history' && typeof b.mtime === 'string' && b.mtime.length > 0));
+  check('listBackups orders history newest first',
+    listed.slice(1).map((b) => b.name).join() === listed.slice(1).map((b) => b.name).sort().reverse().join());
+
+  // Name -> dir resolution: only real names, never a path from the browser.
+  const oldestName = listed[listed.length - 1].name;
+  const resolved = resolveSnapshotDir(keepCfg, oldestName);
+  check('resolveSnapshotDir maps a listed name to its dir',
+    resolved === path.join(keepBase, 'history', oldestName), String(resolved));
+  check('resolveSnapshotDir resolves latest', resolveSnapshotDir(keepCfg, 'latest') === path.join(keepBase, 'latest'));
+  check('resolveSnapshotDir rejects a traversal path',
+    resolveSnapshotDir(keepCfg, '../../etc') === null && resolveSnapshotDir(keepCfg, keepBase) === null);
+  check('resolveSnapshotDir rejects an unknown name', resolveSnapshotDir(keepCfg, '2020-01-01T00-00-00') === null);
+
+  // Restoring the OLDEST snapshot must bring back its content, not latest's.
+  const oldestContent = fs.readFileSync(path.join(keepBase, 'history', oldestName, 'MEMORY.md'), 'utf8');
+  fs.writeFileSync(path.join(keepMem, 'MEMORY.md'), 'clobbered <!-- created=2026-01-01, last=2026-01-01 -->\n');
+  const restoredOld = await restoreFromLatest(keepCfg, keepMem, resolveSnapshotDir(keepCfg, oldestName));
+  const backOld = fs.readFileSync(path.join(keepMem, 'MEMORY.md'), 'utf8');
+  check('an arbitrary history snapshot is restorable',
+    restoredOld >= 1 && backOld === oldestContent, backOld.trim().slice(0, 30));
+}
+
+// 24d. `latest/` is a MIRROR, not an accumulating pile of overwrites.
+//      Regression: overwriting file-by-file left ghosts behind forever — a
+//      project that left the registry, a deleted topic file, or a fixture from
+//      an aborted test stayed in latest/, so latest/ drifted from reality and
+//      its file count stopped matching a same-instant history snapshot.
+{
+  const mirMem = fs.mkdtempSync(path.join(testDir, 'mirmem-'));
+  const mirBase = path.join(testDir, 'mirbackups');
+  const mirCfg = { dir: mirMem, backupDir: mirBase, backupKeep: 5 };
+  const mirProjA = fs.mkdtempSync(path.join(testDir, 'mirprojA-'));
+  const mirProjB = fs.mkdtempSync(path.join(testDir, 'mirprojB-'));
+  for (const [root, tag] of [[mirProjA, 'A'], [mirProjB, 'B']]) {
+    fs.writeFileSync(path.join(root, 'AGENTS.md'), `- rule ${tag}\n\n@memory/a.md — A\n`);
+    fs.mkdirSync(path.join(root, 'memory'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'memory', 'a.md'), `# ${tag}\n`);
+  }
+  fs.writeFileSync(path.join(mirMem, 'MEMORY.md'), 'mirror <!-- created=2026-01-01, last=2026-01-01 -->\n');
+  registerProject(mirMem, mirProjA);
+  registerProject(mirMem, mirProjB);
+  await backupAll(mirCfg);
+  const countFiles = (p) => fs.existsSync(p)
+    ? fs.readdirSync(p, { withFileTypes: true })
+        .reduce((n, e) => n + (e.isDirectory() ? countFiles(path.join(p, e.name)) : 1), 0)
+    : 0;
+  const beforeCount = countFiles(path.join(mirBase, 'latest'));
+  check('a fresh backup mirrors every registered project',
+    fs.existsSync(path.join(mirBase, 'latest', 'projects', path.basename(mirProjA), 'memory', 'a.md')) &&
+    fs.existsSync(path.join(mirBase, 'latest', 'projects', path.basename(mirProjB), 'memory', 'a.md')));
+  check('latest and the same run\'s history snapshot have equal file counts',
+    beforeCount === countFiles(path.join(mirBase, 'history', fs.readdirSync(path.join(mirBase, 'history'))[0])),
+    `latest=${beforeCount}`);
+
+  // drop the project from the registry + delete a topic file, then back up again
+  fs.rmSync(path.join(mirProjB, 'memory', 'a.md'));
+  check('unregisterProject removes the project from the registry',
+    unregisterProject(mirMem, mirProjB) === true &&
+    listRegistered(mirMem).every((p) => p.name !== path.basename(mirProjB)));
+  await backupAll(mirCfg);
+  check('latest drops a project that left the registry',
+    !fs.existsSync(path.join(mirBase, 'latest', 'projects', path.basename(mirProjB))));
+  check('latest keeps the surviving project intact',
+    fs.existsSync(path.join(mirBase, 'latest', 'projects', path.basename(mirProjA), 'memory', 'a.md')));
+  check('latest file count shrinks instead of accumulating', countFiles(path.join(mirBase, 'latest')) < beforeCount,
+    `${countFiles(path.join(mirBase, 'latest'))} < ${beforeCount}`);
+
+  // no staging/retired leftovers after a normal run
+  const stray = fs.readdirSync(mirBase).filter((n) => n.includes('.staging-') || n.includes('.retired-'));
+  check('the mirror swap leaves no temp dirs behind', stray.length === 0, stray.join(','));
+  check('latest still has the global memory file',
+    fs.readFileSync(path.join(mirBase, 'latest', 'MEMORY.md'), 'utf8').includes('mirror'));
+}
+
 // 25. admin project routes: registry gate + write/read/delete
 const routeCtx = {
   logger: { warn: () => {}, info: () => {} },
@@ -920,6 +1033,53 @@ const routes = makeAdminRoutes({
 });
 check('admin exposes the project route family', ['projectRead', 'projectWrite', 'projectCreate', 'projectDelete', 'projectResident', 'projectMigrate', 'projectRegister', 'projectGuide']
   .every((name) => routes.some((r) => r.path === `/api/persona-memory/${name}`)));
+
+// 25a. the restore route restores the snapshot it is asked for (by name)
+{
+  const rMem = fs.mkdtempSync(path.join(testDir, 'rtmem-'));
+  const rBase = path.join(testDir, 'rtbackups');
+  const rCfg = { dir: rMem, backupDir: rBase, autoBackupMin: 0, autoSwitchOnPiLoss: false };
+  fs.writeFileSync(path.join(rMem, 'MEMORY.md'), 'old <!-- created=2026-01-01, last=2026-01-01 -->\n');
+  await backupAll(rCfg);
+  await new Promise((r) => setTimeout(r, 1100));
+  fs.writeFileSync(path.join(rMem, 'MEMORY.md'), 'new <!-- created=2026-01-01, last=2026-01-01 -->\n');
+  await backupAll(rCfg);
+  const rtRoutes = makeAdminRoutes({
+    store: createMemoryStore({ dir: rMem, limits: BIG_LIMITS }),
+    standing: createStandingStore({ dir: rMem, maxEntries: 20, maxChars: 2000 }),
+    vector: {},
+    cfg: rCfg,
+    ctx: { logger: { warn() {}, info() {} } },
+    getRoute: () => undefined,
+    profilePatch: path.join(testDir, 'rt.yml'),
+    log: () => {},
+  });
+  const rtRoute = rtRoutes.find((r) => r.path === '/api/persona-memory/restoreLatest');
+  const callRestore = async (body) => {
+    const req = {
+      method: 'POST', url: '/',
+      headers: { host: '127.0.0.1:3080' }, socket: { remoteAddress: '127.0.0.1' },
+      [Symbol.asyncIterator]: async function* () {
+        yield Buffer.from(JSON.stringify(body));
+      },
+    };
+    const res = { statusCode: 0, body: '', setHeader() {}, writeHead(c) { this.statusCode = c; }, end(b) { this.body = String(b); } };
+    await rtRoute.handler(req, res);
+    return { status: res.statusCode, payload: JSON.parse(res.body || '{}') };
+  };
+  const oldName = listBackups(rCfg).filter((b) => b.kind === 'history').sort((a, b) => a.name.localeCompare(b.name))[0].name;
+  const got = await callRestore({ snapshot: oldName });
+  const restoredText = fs.readFileSync(path.join(rMem, 'MEMORY.md'), 'utf8');
+  check('restoreLatest restores the requested snapshot, not latest',
+    got.status === 200 && restoredText.includes('old'), `${got.status} ${restoredText.trim().slice(0, 20)}`);
+  check('restoreLatest echoes which snapshot it used',
+    got.payload.snapshot === oldName, String(got.payload.snapshot));
+  const bad = await callRestore({ snapshot: '../../etc' });
+  check('restoreLatest refuses an unknown/traversal snapshot name', bad.status === 404, String(bad.status));
+  const def = await callRestore({});
+  check('restoreLatest defaults to latest when no snapshot is given',
+    def.status === 200 && fs.readFileSync(path.join(rMem, 'MEMORY.md'), 'utf8').includes('new'), def.payload.message);
+}
 
 // 25b. a refused migration reports its reason (not a bare HTTP error)
 {
@@ -1082,7 +1242,16 @@ check('migration skips an already-canonical file', migNoop.migrated === false &&
   const pluginCfg = {
     dir: backupMemDir, autoBackupMin: 0, inject: false, projectEnabled: false,
     standingEnabled: false, learnEnabled: false, vectorEnabled: false,
-    memoryFtsEnabled: false, adminProfile: 'web',
+    memoryFtsEnabled: false,
+    // `adminProfile` must NOT name a real profile: `startAutoProtect` re-reads
+    // that profile's cordis.patch.yml and its `autoBackupMin` OVERRIDES the
+    // `autoBackupMin: 0` above. With the real `web` profile (1440 min) the very
+    // first tick backed the smoke fixture up into the LIVE
+    // ~/.dsh/memory-backup/ (it clobbered latest/MEMORY.md). A profile that
+    // does not exist makes the patch read fail => cfg values win => no backup.
+    adminProfile: 'smoke-test-no-such-profile',
+    // belt and braces: even if a tick did fire, it lands in the temp dir
+    backupDir: path.join(testDir, 'autoprotect-backups'),
   };
   const state = { routes: new Map(), effects: [] };
   apply(makeCtx(state), pluginCfg);
@@ -1126,6 +1295,12 @@ check('migration skips an already-canonical file', migNoop.migrated === false &&
   apply(makeCtx(), {
     dir: bootRegistry, autoBackupMin: 0, standingEnabled: false, learnEnabled: false,
     vectorEnabled: false, memoryFtsEnabled: false, projectEnabled: true,
+    // Same trap as test 26: `startAutoProtect` re-reads the profile patch of
+    // `adminProfile` and lets its `autoBackupMin` override the 0 above. Naming
+    // the real `web` profile made this test back the boot fixture into the LIVE
+    // backup dir. A non-existent profile + a temp backupDir keeps it hermetic.
+    adminProfile: 'smoke-test-no-such-profile',
+    backupDir: path.join(testDir, 'autoprotect-backups'),
   });
   const emptyBlock = render(bootRoot);
   check('an empty git repo gets the bootstrap hint', /还没有项目记忆/.test(emptyBlock), emptyBlock.slice(0, 80));

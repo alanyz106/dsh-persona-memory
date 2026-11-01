@@ -41,7 +41,10 @@ interface StatusPayload {
   config: Record<string, unknown>;
   schema?: SchemaFieldClient[];
   backupDir: string;
-  backups: Array<{ name: string; files: number }>;
+  /** Snapshot list: `latest` (the live mirror) first, then dated snapshots newest first. */
+  backups: BackupSnapshot[];
+  /** How many dated snapshots are retained (`backupKeep`; 0 = latest-only). */
+  backupKeep?: number;
   stores: Record<string, { exists: boolean; entries: number; chars: number; usagePct: number }>;
   standing: { exists: boolean; instructions: string[]; chars: number };
   indexes: { fts: { exists: boolean; size: number }; vector: { exists: boolean; size: number } };
@@ -55,6 +58,17 @@ interface EditingState {
   which: string;
   index: number;
   text: string;
+}
+
+/** One restore source listed by the host (`GET /status`). */
+interface BackupSnapshot {
+  /** `latest` for the live mirror, else the dated snapshot dir stamp. */
+  name: string;
+  kind: 'latest' | 'history';
+  files: number;
+  /** Snapshot creation time (ISO); '' when unknown. */
+  mtime: string;
+  restorable: boolean;
 }
 
 interface ProjectEntryInfo {
@@ -168,6 +182,15 @@ function btn(
       cursor: opts && opts.disabled ? 'default' : 'pointer',
     }, opts && opts.style),
   }, label);
+}
+
+/** `2026-11-01T05:44:50.123Z` → local `2026-11-01 13:44:50`. */
+function fmtStamp(iso: string): string {
+  if (!iso) return '-';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const p = (n: number): string => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
 function input(value: unknown, onChange: (v: string) => void, placeholder?: string): React.ReactElement {
@@ -331,7 +354,8 @@ function MemAdminPage(): React.ReactElement {
   /** config-group disclosure inside 插件配置; missing key = expanded (schema-driven groups are mostly read top-down) */
   const [cfgGroupsOpen, setCfgGroupsOpen] = React.useState<Record<string, boolean>>(initialUi.configGroups);
   const [modelStatus, setModelStatus] = React.useState<ModelStatusState | null>(null);
-  const [confirmRestore, setConfirmRestore] = React.useState(false);
+  /** Pending restore confirmation: the snapshot NAME the user clicked. */
+  const [confirmRestore, setConfirmRestore] = React.useState<string | null>(null);
 
   const load = React.useCallback(async () => {
     setBusy(true);
@@ -414,7 +438,7 @@ function MemAdminPage(): React.ReactElement {
       setScanPath('');
       setStandingEdit(null);
       setNewStanding('');
-      setConfirmRestore(false);
+      setConfirmRestore(null);
       await load();
     } catch (e) {
       setError(String((e && (e as Error).message) || e));
@@ -858,31 +882,59 @@ function MemAdminPage(): React.ReactElement {
     ),
   );
 
-  const backupsBody = (): React.ReactElement => React.createElement('div', null,
-    React.createElement('div', { style: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)', padding: '6px 0' } },
-      '备份目录: ' + (state.backupDir || '') + '（与 Pi 完全隔离，只保留最新一份快照）'),
-    backups.length === 0
-      ? React.createElement('div', { style: { fontSize: 13, color: 'var(--dsw-alias-label-secondary)', padding: '8px 0' } }, '（尚无备份，可手动备份或等待自动备份）')
-      : backups.map((b) => React.createElement('div', {
-          key: b.name,
-          style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 0', fontSize: 13, borderBottom: '1px solid var(--dsw-alias-border-l1)' },
-        },
-          React.createElement('span', null, b.name),
-          React.createElement('span', { style: { color: 'var(--dsw-alias-label-secondary)' } }, b.files + ' 个文件'),
-        )),
-    React.createElement('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', padding: '12px 0 2px' } },
-      btn('立即备份', () => mutate('backup', {}), { style: { background: 'var(--dsw-alias-bg-layer-2)' } }),
-      confirmRestore
-        ? React.createElement(React.Fragment, null,
-            React.createElement('span', { style: { fontSize: 12, color: 'var(--dsw-alias-state-warn-primary)' } }, '确认用最新备份覆盖当前记忆?'),
-            btn('确认恢复', () => mutate('restoreLatest', {}), { style: { background: 'var(--dsw-alias-state-error-primary)', borderColor: 'transparent', color: '#fff' } }),
-            btn('取消', () => setConfirmRestore(false)),
-          )
-        : btn('从最新备份恢复', () => setConfirmRestore(true), { style: { background: 'var(--dsw-alias-bg-layer-2)' } }),
-    ),
-    React.createElement('div', { style: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)', padding: '6px 0' } },
-      '自动备份间隔由插件配置中的「自动备份间隔」控制；Pi 记忆丢失时默认自动切回本地并恢复。'),
-  );
+  const backupsBody = (): React.ReactElement => {
+    // Two columns: actions on the left, the snapshot list on the right. Each
+    // row = timestamp · file count · its own 恢复 button, so the restore source
+    // is always the row you clicked (there is no separate "restore latest"
+    // mode — `latest` is simply the first row).
+    const restoreRow = (b: BackupSnapshot): React.ReactElement => {
+      const confirming = confirmRestore === b.name;
+      return React.createElement('div', {
+        key: b.name,
+        style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, padding: '7px 0', fontSize: 13, borderBottom: '1px solid var(--dsw-alias-border-l1)' },
+      },
+        React.createElement('span', { style: { flex: 1, minWidth: 0, display: 'flex', alignItems: 'baseline', gap: 6, flexWrap: 'wrap' } },
+          React.createElement('span', { style: { fontVariantNumeric: 'tabular-nums' } }, fmtStamp(b.mtime)),
+          b.kind === 'latest'
+            ? React.createElement('span', { style: { color: 'var(--dsw-alias-state-success-primary)', fontSize: 12 } }, '最新')
+            : null,
+          React.createElement('span', { style: { color: 'var(--dsw-alias-label-secondary)', fontSize: 12, whiteSpace: 'nowrap' } }, b.files + ' 文件'),
+        ),
+        confirming
+          ? React.createElement(React.Fragment, null,
+              btn('确认覆盖', () => mutate('restoreLatest', { snapshot: b.name }), { style: { background: 'var(--dsw-alias-state-error-primary)', borderColor: 'transparent', color: '#fff', padding: '3px 10px', fontSize: 12 } }),
+              btn('取消', () => setConfirmRestore(null), { style: { padding: '3px 10px', fontSize: 12 } }),
+            )
+          : btn('恢复', () => setConfirmRestore(b.name), {
+              style: { background: 'var(--dsw-alias-bg-layer-2)', padding: '3px 10px', fontSize: 12, whiteSpace: 'nowrap' },
+              title: '用该快照覆盖当前记忆',
+            }),
+      );
+    };
+    return React.createElement('div', {
+      style: { display: 'flex', flexWrap: 'wrap', gap: 16, alignItems: 'flex-start', paddingTop: 6 },
+    },
+      // left column: where the backups live + the manual action
+      React.createElement('div', { style: { flex: '1 1 200px', minWidth: 180 } },
+        React.createElement('div', { style: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)', lineHeight: 1.6, wordBreak: 'break-all' } },
+          '备份目录: ' + (state.backupDir || '')),
+        React.createElement('div', { style: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)', lineHeight: 1.6, marginTop: 4 } },
+          '与 Pi 完全隔离；latest 每次覆盖写一份，历史快照保留最近 ' + (state.backupKeep ?? 14)
+          + ' 份（「插件配置 → 备份」可改，0=只留 latest）'),
+        React.createElement('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', padding: '10px 0 0' } },
+          btn('立即备份', () => mutate('backup', {}), { style: { background: 'var(--dsw-alias-bg-layer-2)' } }),
+        ),
+        React.createElement('div', { style: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)', lineHeight: 1.6, marginTop: 8 } },
+          '「恢复」会用该快照覆盖当前记忆（全局 4 文件 + 已登记项目），需二次确认。Pi 记忆丢失时默认自动切回本地并从 latest 恢复。'),
+      ),
+      // right column: the snapshot list
+      React.createElement('div', { style: { flex: '2 1 320px', minWidth: 240 } },
+        backups.length === 0
+          ? React.createElement('div', { style: { fontSize: 13, color: 'var(--dsw-alias-label-secondary)', padding: '8px 0' } }, '（尚无备份，可手动备份或等待自动备份）')
+          : backups.map(restoreRow),
+      ),
+    );
+  };
 
   const configBody = (): React.ReactElement => {
     if (!cfgForm || !Array.isArray(state.schema)) {
@@ -1009,7 +1061,10 @@ function MemAdminPage(): React.ReactElement {
   const idxSummary = (idx.fts && idx.fts.exists ? 'FTS5 ' + fmtBytes(idx.fts.size) : 'FTS5 未生成') + ' · '
     + (idx.vector && idx.vector.exists ? '向量 ' + fmtBytes(idx.vector.size) : '向量未启用');
   const projectsSummary = projects.length + ' 个';
-  const backupsSummary = backups.length > 0 ? backups[0].files + ' 文件' : '无';
+  const historyCount = backups.filter((b) => b.kind === 'history').length;
+  const backupsSummary = backups.length > 0
+    ? 'latest + ' + historyCount + ' 历史 · ' + backups[0].files + ' 文件'
+    : '无';
   const configSummary = (state.schema || []).length + ' 项';
 
   return React.createElement('div', { style: { maxWidth: 720 } },

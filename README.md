@@ -33,7 +33,7 @@
 | `memory_search`（混合检索，全局记忆） | 优先 **FTS5 + 语义向量（RRF 融合）**：FTS5 全文索引（`<dir>/.memory-index.sqlite`，mtime 自动重建）+ 向量索引（`vectorIndexDir` 下 `.memory-vec.sqlite`，只存 embedding、指纹增量同步、纯 JS 余弦）；向量未启用时走 FTS5，SQLite 不可用时回退子串扫描；结果始终 ≤`searchMaxResults` 条、只进工具输出，注入成本不随检索方式增加 |
 | 用量提示 | 所有 `memory` 操作返回用量百分比；达 90%（`usageNudgeThreshold`）提醒用 `rewrite` 合并 |
 | `/standing` 命令 | 用户管理常驻指令（列出 / add / remove / clear） |
-| WebUI 记忆管理页 | 设置页「记忆管理」区块（`settings.section` slot）：常驻指令增删改、三记忆文件条目编辑/删除、**项目记忆卡**（常驻区编辑 + `@` 索引行按文件编辑/删除 + 孤儿文件 + 新建 + 迁移 + 手动登记）、FTS5/向量索引状态与重建、向量搜索配置、已下载模型扫描与缓存检测、**插件配置卡**（schema 驱动全量配置）、**本地备份卡**（立即备份/恢复、自动备份；项目记忆按注册表快照） |
+| WebUI 记忆管理页 | 设置页「记忆管理」区块（`settings.section` slot）：常驻指令增删改、三记忆文件条目编辑/删除、**项目记忆卡**（常驻区编辑 + `@` 索引行按文件编辑/删除 + 孤儿文件 + 新建 + 迁移 + 手动登记）、FTS5/向量索引状态与重建、向量搜索配置、已下载模型扫描与缓存检测、**插件配置卡**（schema 驱动全量配置）、**本地备份卡**（左侧：备份目录 / 立即备份；右侧：快照列表，每行带时间戳 + 文件数 + 独立「恢复」按钮，`latest` 只是第一行；项目记忆按注册表快照） |
 
 ### C. 自动学习机制
 
@@ -61,7 +61,7 @@
 | 字节格式稳定性 | 无尾随换行、charCount 含分隔符、USER 上限 5000、超限拒绝写入、注入 `<memory-context>` 围栏 |
 | 路径安全闸门 | 项目记忆的每个路径（工具参数、管理页 body、迁移产物）都过 `safeMemoryRel`：必须 `memory/**.md`、无 `..`、无绝对路径、无 dotfile、resolve 后仍在 `memory/` 内（含符号链接逃逸检查） |
 | 优雅降级 | FTS5 不可用回退子串搜索；SQLite 动态 import，插件绝不硬依赖 |
-| 275 项冒烟测试 | 验证存储格式、解析、读写、扫描、合并、项目根探测、索引解析、路径安全、迁移校验、备份恢复、纠正、FTS、向量索引、溢出拒绝、并发全链路 |
+| 365 项冒烟测试 | 验证存储格式、解析、读写、扫描、合并、项目根探测、索引解析、路径安全、迁移校验、备份恢复、纠正、FTS、向量索引、溢出拒绝、并发全链路 |
 ---
 
 ## 借鉴来源（明确声明）
@@ -181,7 +181,8 @@ file: 安装是真实副本——改代码后须重新构建、`dsh plugin --pro
 | `embeddingCacheDir` | `$DSH_HOME/models` | local 模型缓存目录（首次自动下载到此处） |
 | `embeddingRemoteHost` | `https://huggingface.co` | local 模型下载源；大陆可用 `https://hf-mirror.com` |
 | `adminProfile` | `web` | 记忆管理页配置写回的目标 profile（`~/.dsh/profiles/<名>/cordis.patch.yml`） |
-| `autoBackupMin` | `60` | 自动备份间隔（分钟）；`0` 关闭；只保留最新一份快照到 `$DSH_HOME/memory-backup/latest/` |
+| `autoBackupMin` | `60` | 自动备份间隔（分钟）；`0` 关闭。每次备份把 `$DSH_HOME/memory-backup/latest/` **整体换新**（当前状态的精确镜像，不再累积幽灵文件），**并**另写一份带时间戳的历史快照到 `memory-backup/history/<时间戳>/` |
+| `backupKeep` | `14` | 历史快照保留份数（每次备份一份，等于滚动窗口：默认间隔 60 分钟 ≈ 最近 14 小时）。`0` = 只保留 `latest/` 一份。管理页备份卡对**每一份**快照都提供独立「恢复」按钮，不限于最新 |
 | `fileLogEnabled` | `true` | 文件日志：把插件日志（每次记忆写入的审计行、学习运行统计、纠正落盘）写到 `$DSH_HOME/logs/persona-memory.log`。cordis logger 默认只有内存缓冲、无 exporter 不落盘，本开关补上 sink |
 | `fileLogPath` | `''` | 日志文件路径；留空用默认 `$DSH_HOME/logs/persona-memory.log` |
 | `autoSwitchOnPiLoss` | `true` | Pi 共享记忆丢失（曾见 MEMORY.md 后消失）时自动切到 `$DSH_HOME/memory` 并从最新备份恢复 |
