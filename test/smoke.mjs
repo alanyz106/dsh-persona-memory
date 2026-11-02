@@ -1311,7 +1311,11 @@ check('migration skips an already-canonical file', migNoop.migrated === false &&
   // now give it memory: the bootstrap hint is replaced by the core rules
   fs.writeFileSync(path.join(bootRoot, 'AGENTS.md'), '- 构建：npm run build\n\n@memory/build.md — 构建\n');
   const filledBlock = render(bootRoot);
-  check('a project with memory gets the resident/index convention', /已在上方注入/.test(filledBlock), filledBlock.slice(0, 80));
+  check('a project with memory gets the resident/index convention', /长期记忆在 `AGENTS\.md`/.test(filledBlock), filledBlock.slice(0, 80));
+  // The block must not claim where agent-instructions put AGENTS.md: on the
+  // first request its baseline is appended as a user message, i.e. below this
+  // prompt, so any "above" wording is wrong on turn 1.
+  check('the convention makes no claim about where AGENTS.md was injected', !/上方/.test(filledBlock), filledBlock.slice(0, 80));
   check('the filled block carries the authoring essentials', /常驻区/.test(filledBlock) && /project_memory guide/.test(filledBlock));
   check('the filled block no longer bootstraps', !/还没有项目记忆/.test(filledBlock));
   check('reading a populated project registers it', listRegistered(bootRegistry).length === 1);

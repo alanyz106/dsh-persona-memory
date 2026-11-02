@@ -215,9 +215,14 @@ function renderProjectBlock(root: string, index: ProjectIndex, cwd: string): str
     // repeating the pointers would only burn tokens. Add the convention that
     // the pointers are lazy (nothing here is loaded until the model reads it)
     // and the authoring rules that keep the split intact as it grows.
+    //
+    // This block deliberately makes no claim about WHERE the file was injected:
+    // `agent-instructions` appends its baseline as a user message while the
+    // first request is prepared, so on turn 1 it lands below this prompt rather
+    // than above it. Naming the file is enough; the position is not ours to say.
     return [
       '### 项目记忆',
-      '本仓库的长期记忆在 `AGENTS.md`（已在上方注入）：非 `@` 行是常驻规则，末尾的 `@memory/*.md` 行是主题文件索引。',
+      '本仓库的长期记忆在 `AGENTS.md`：非 `@` 行是常驻规则，末尾的 `@memory/*.md` 行是主题文件索引。',
       '主题文件不在上下文里——做那类工作前先用 `project_memory read`（或 `read`）读进来。',
       ...core,
     ].join('\n');
