@@ -13,7 +13,31 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
-import React from 'react';
+
+/**
+ * `react` is a peer dependency (the dsh web host provides it at runtime), and
+ * CI installs with --legacy-peer-deps, so it is NOT in node_modules there.
+ * This test only renders React.createElement trees with a hook dispatcher, so
+ * a tiny local shim is enough — no react-dom, no browser, no network.
+ */
+const dispatcherBox = { current: null };
+/** Every hook delegates to whichever dispatcher the harness installed. */
+const hook = (name) => (...args) => {
+  const d = dispatcherBox.current;
+  if (!d) throw new Error('rendered outside the test dispatcher: ' + name);
+  return d[name](...args);
+};
+const React = {
+  createElement(type, props, ...children) {
+    return { type, props: Object.assign({}, props, children.length <= 1 ? { children: children[0] } : { children }), key: null, ref: null };
+  },
+  useState: hook('useState'),
+  useEffect: hook('useEffect'),
+  useCallback: hook('useCallback'),
+  useRef: hook('useRef'),
+  useLayoutEffect: hook('useLayoutEffect'),
+  __SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED: { ReactCurrentDispatcher: dispatcherBox },
+};
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const require = createRequire(import.meta.url);
@@ -48,6 +72,14 @@ globalThis.window = {
   navigator: { clipboard: { writeText: () => {} } },
 };
 // The bundle is a plain browser script (CJS factory), not an ES module.
+process.on('uncaughtException', (err) => {
+  console.error('UNCAUGHT', err && err.stack || err);
+  process.exit(1);
+});
+process.on('unhandledRejection', (err) => {
+  console.error('UNHANDLED', err && err.stack || err);
+  process.exit(1);
+});
 new Function('window', 'require', bundle)(globalThis.window, require);
 check('client bundle registers under the package name',
   !!registered && registered.id === '@alanyz106/dsh-persona-memory', String(registered && registered.id));
