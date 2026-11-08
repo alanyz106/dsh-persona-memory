@@ -149,6 +149,44 @@ function realpathOrSelf(p: string): string {
 }
 
 /**
+ * Split AGENTS.md text into resident prose + `@` index entries.
+ *
+ * Kept separate from `readIndex` so the archive importer can validate a
+ * candidate AGENTS.md (from a zip that is not on disk yet) with exactly the
+ * same rules the reader will later apply. A line-level pointer that escapes
+ * `memory/` is not silently dropped: it stays in the resident block, so the
+ * importer's secret scanner still sees it.
+ *
+ * @param root absolute project root (used by the path gate)
+ * @param raw full AGENTS.md text
+ */
+export function parseAgentsText(root: string, raw: string): {
+  resident: string[];
+  entries: Array<{ file: string; summary: string }>;
+} {
+  const resident: string[] = [];
+  const entries: Array<{ file: string; summary: string }> = [];
+  for (const line of raw.split('\n')) {
+    const summaryMatch = INDEX_WITH_SUMMARY.exec(line);
+    const bareMatch = summaryMatch ? null : INDEX_BARE.exec(line);
+    const match = summaryMatch ?? bareMatch;
+    if (!match) {
+      resident.push(line);
+      continue;
+    }
+    const rel = safeMemoryRel(root, match[1]);
+    if (!rel) {
+      // A pointer that escapes the memory directory is not an index entry;
+      // keep it visible as resident text rather than silently dropping it.
+      resident.push(line);
+      continue;
+    }
+    entries.push({ file: rel, summary: bareMatch ? '' : (match[2] ?? '').trim() });
+  }
+  return { resident: trimBlankEdges(resident), entries };
+}
+
+/**
  * Parse AGENTS.md into resident prose + index entries.
  *
  * @param root absolute project root
@@ -175,30 +213,11 @@ export function readIndex(root: string): ProjectIndex {
     return index;
   }
 
-  const resident: string[] = [];
-  for (const line of raw.split('\n')) {
-    const summaryMatch = INDEX_WITH_SUMMARY.exec(line);
-    const bareMatch = summaryMatch ? null : INDEX_BARE.exec(line);
-    const match = summaryMatch ?? bareMatch;
-    if (!match) {
-      resident.push(line);
-      continue;
-    }
-    const rel = safeMemoryRel(root, match[1]);
-    if (!rel) {
-      // A pointer that escapes the memory directory is not an index entry;
-      // keep it visible as resident text rather than silently dropping it.
-      resident.push(line);
-      continue;
-    }
-    index.entries.push({
-      file: rel,
-      summary: bareMatch ? '' : (match[2] ?? '').trim(),
-      exists: false,
-      chars: 0,
-    });
+  const parsed = parseAgentsText(root, raw);
+  index.resident = parsed.resident;
+  for (const entry of parsed.entries) {
+    index.entries.push({ file: entry.file, summary: entry.summary, exists: false, chars: 0 });
   }
-  index.resident = trimBlankEdges(resident);
   for (const entry of index.entries) {
     const stat = statFile(path.join(root, ...entry.file.split('/')));
     entry.exists = stat !== null;

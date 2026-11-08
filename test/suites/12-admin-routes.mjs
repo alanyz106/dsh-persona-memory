@@ -16,11 +16,17 @@ import { BIG_LIMITS, check, shared, testDir } from '../harness.mjs';
 
 const backupMemDir = shared.backupMemDir;
 
-/** Minimal response object the routes can write into. */
+/** Minimal response object the routes can write into (headers captured too,
+ *  so the binary archive download can be asserted). `body` keeps the raw value
+ *  a Buffer route writes; JSON routes still store a string. */
 const makeRes = () => ({
-  statusCode: 0, body: '', setHeader() {},
-  writeHead(code) { this.statusCode = code; },
-  end(body) { this.body = String(body); },
+  statusCode: 0, body: '', headers: {},
+  setHeader(key, value) { this.headers[key.toLowerCase()] = String(value); },
+  writeHead(code, headers) {
+    this.statusCode = code;
+    if (headers) for (const [k, v] of Object.entries(headers)) this.headers[k.toLowerCase()] = String(v);
+  },
+  end(body) { this.body = Buffer.isBuffer(body) ? body : String(body); },
 });
 
 /** Minimal POST request carrying one JSON body. */
@@ -30,6 +36,13 @@ const postReq = (body) => ({
   [Symbol.asyncIterator]: async function* () {
     if (body !== undefined) yield Buffer.from(JSON.stringify(body));
   },
+});
+
+/** Minimal POST request carrying a raw (binary) body. */
+const rawReq = (buf) => ({
+  method: 'POST', url: '/',
+  headers: { host: '127.0.0.1:3080' }, socket: { remoteAddress: '127.0.0.1' },
+  [Symbol.asyncIterator]: async function* () { yield buf; },
 });
 
 /** Minimal GET request. */
@@ -54,8 +67,65 @@ const routes = makeAdminRoutes({
   profilePatch: path.join(testDir, 'cordis.patch.yml'),
   log: () => {},
 });
-check('admin exposes the project route family', ['projectRead', 'projectWrite', 'projectCreate', 'projectDelete', 'projectResident', 'projectMigrate', 'projectMigrateStatus', 'projectRegister', 'projectGuide']
+check('admin exposes the project route family', ['projectRead', 'projectWrite', 'projectCreate', 'projectDelete', 'projectResident', 'projectMigrate', 'projectMigrateStatus', 'projectRegister', 'projectGuide', 'projectExport', 'projectImport']
   .every((name) => routes.some((r) => r.path === `/api/persona-memory/${name}`)));
+
+// 25-archive. export/import round trip through the HTTP routes
+{
+  const arcMemDir = fs.mkdtempSync(path.join(testDir, 'arcadmin-'));
+  const arcSrc = fs.mkdtempSync(path.join(testDir, 'arcsrcrepo-'));
+  fs.mkdirSync(path.join(arcSrc, '.git'));
+  fs.mkdirSync(path.join(arcSrc, 'memory'), { recursive: true });
+  fs.writeFileSync(path.join(arcSrc, 'AGENTS.md'), '- 构建：npm run build\n\n@memory/a.md — A\n');
+  fs.writeFileSync(path.join(arcSrc, 'memory', 'a.md'), '# A\n\n内容\n');
+  registerProject(arcMemDir, arcSrc);
+  const arcDst = fs.mkdtempSync(path.join(testDir, 'arcdstrepo-'));
+  fs.mkdirSync(path.join(arcDst, '.git'));
+  registerProject(arcMemDir, arcDst);
+  const arcRoutes = makeAdminRoutes({
+    store: createMemoryStore({ dir: arcMemDir, limits: BIG_LIMITS }),
+    standing: createStandingStore({ dir: arcMemDir, maxEntries: 20, maxChars: 2000 }),
+    vector: {},
+    cfg: { dir: arcMemDir, autoBackupMin: 0 },
+    ctx: { logger: { warn() {}, info() {} } },
+    getRoute: () => undefined,
+    profilePatch: path.join(testDir, 'arc.yml'),
+    log: () => {},
+  });
+  const exportRoute = arcRoutes.find((r) => r.path === '/api/persona-memory/projectExport');
+  const importRoute = arcRoutes.find((r) => r.path === '/api/persona-memory/projectImport');
+
+  const exportRes = makeRes();
+  await exportRoute.handler(postReq({ project: path.basename(arcSrc) }), exportRes);
+  const zipBytes = Buffer.isBuffer(exportRes.body) ? exportRes.body : Buffer.from(String(exportRes.body || ''), 'binary');
+  check('projectExport answers a zip, not JSON',
+    exportRes.statusCode === 200 && exportRes.headers['content-type'] === 'application/zip',
+    `${exportRes.statusCode} ${exportRes.headers['content-type']}`);
+  check('projectExport names the download after the project',
+    new RegExp(`^attachment; filename="${path.basename(arcSrc)}-memory-\\d{8}-\\d{6}\\.zip"$`).test(String(exportRes.headers['content-disposition'])),
+    String(exportRes.headers['content-disposition']));
+
+  const importRes = makeRes();
+  importRes.url = '';
+  await importRoute.handler({ ...rawReq(zipBytes), url: `/?project=${encodeURIComponent(path.basename(arcDst))}` }, importRes);
+  const importPayload = JSON.parse(importRes.body || '{}');
+  check('projectImport writes the archive into the target project',
+    importRes.statusCode === 200 && importPayload.ok === true && fs.existsSync(path.join(arcDst, 'memory', 'a.md')),
+    `${importRes.statusCode} ${importRes.body.slice(0, 200)}`);
+  check('projectImport keeps the source project untouched',
+    fs.existsSync(path.join(arcSrc, 'memory', 'a.md')) && !fs.existsSync(path.join(arcSrc, 'AGENTS.md.bak-')),
+    'source changed');
+
+  const badImport = makeRes();
+  await importRoute.handler({ ...rawReq(Buffer.from('not a zip')), url: `/?project=${encodeURIComponent(path.basename(arcDst))}` }, badImport);
+  check('projectImport refuses a non-zip body with a readable reason',
+    badImport.statusCode === 400 && /zip/.test(String(JSON.parse(badImport.body || '{}').error)),
+    badImport.body);
+
+  const unknownImport = makeRes();
+  await importRoute.handler({ ...rawReq(zipBytes), url: '/?project=nope' }, unknownImport);
+  check('projectImport refuses an unregistered project name', unknownImport.statusCode === 404, String(unknownImport.statusCode));
+}
 
 // 25a. the restore route restores the snapshot it is asked for (by name)
 {

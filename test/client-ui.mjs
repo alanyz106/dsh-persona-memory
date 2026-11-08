@@ -212,14 +212,21 @@ const calls = makeFetch({ default: () => WITH_PROJECT });
 // Persisted UI state: all six cards open + the demo project accordion open, so
 // the migration button is visible on the very first settled render.
 const openCards = { standing: true, files: true, indexes: true, projects: true, backups: true, config: true };
-// Hook indices (verified call order in MemAdminPage): 7 = initialUi,
-// 8 = projOpen, 19 = open, 23 = cfgGroupsOpen.
-const seed = {
-  7: { open: openCards, projOpen: 'demo', residentOpen: {}, configGroups: {} },
-  8: 'demo',
-  19: openCards,
-  23: {},
+/**
+ * Seed the persisted UI state through localStorage instead of hardcoded hook
+ * indices: `loadUiState()` only runs on first render, so this pins the expanded
+ * cards without depending on the component's internal hook order (adding one
+ * useState used to shift every index by one and silently break the assertions).
+ */
+const seededStorage = {};
+globalThis.window.localStorage = {
+  getItem: (key) => (key in seededStorage ? seededStorage[key] : null),
+  setItem: (key, value) => { seededStorage[key] = String(value); },
 };
+seededStorage['persona-memory.ui'] = JSON.stringify({
+  open: openCards, projOpen: 'demo', residentOpen: {}, configGroups: {},
+});
+const seed = {};
 const hooks = [];
 const first = renderOnce(Page, hooks, seed);
 check('initial render shows a loading state', /正在加载/.test(visibleText(first.tree)));
@@ -238,6 +245,86 @@ check('migration hint names the inherited default model and configurable timeout
 check('migration tooltip names the route and timeout',
   !!migrateBtn && /9router\/cbcn\/hy4free/.test(String(migrateBtn.props.title)) && /20 分钟/.test(String(migrateBtn.props.title)),
   String(migrateBtn && migrateBtn.props.title));
+
+// ---- archive export/import buttons (cross-machine migration)
+const exportBtn = findButton(tree, '导出记忆包');
+const importBtn = findButton(tree, '导入记忆包');
+check('prose project exposes 导出记忆包 / 导入记忆包 next to the migration button',
+  !!exportBtn && !!importBtn, JSON.stringify({ exportBtn: !!exportBtn, importBtn: !!importBtn }));
+check('导出记忆包 is enabled for a project that has AGENTS.md',
+  !!exportBtn && exportBtn.props.disabled !== true && typeof exportBtn.props.onClick === 'function');
+check('the archive hint explains what the zip contains',
+  /zip 内是 AGENTS\.md \+ memory\//.test(visibleText(tree)), visibleText(tree).slice(-320));
+
+// Clicking 导出记忆包 must hit the binary route and hand a Blob to the browser.
+{
+  const zipBytes = new Uint8Array([0x50, 0x4b, 0x03, 0x04]);
+  const downloadCalls = [];
+  const blobUrls = [];
+  globalThis.fetch = async () => ({
+    ok: true, status: 200,
+    headers: { get: () => 'demo-memory-20261108-120000.zip' },
+    blob: async () => ({ size: zipBytes.length, __blob: true }),
+    json: async () => ({}),
+  });
+  globalThis.Blob = function Blob() { this.__blob = true; };
+  globalThis.document = {
+    createElement: () => ({ set href(v) { downloadCalls.push(v); }, click() { downloadCalls.push('click'); }, rel: '', download: '' }),
+    body: { appendChild: () => {}, removeChild: () => {} },
+  };
+  globalThis.URL.createObjectURL = (blob) => { blobUrls.push(blob); return 'blob:demo'; };
+  globalThis.URL.revokeObjectURL = () => {};
+  exportBtn.props.onClick();
+  const afterExport = renderOnce(Page, hooks, seed);
+  await runEffects(afterExport.effects);
+  const exportTree = renderOnce(Page, hooks, seed).tree;
+  check('导出记忆包 created a Blob URL and clicked a download link',
+    blobUrls.length === 1 && downloadCalls.includes('click'), JSON.stringify({ blobUrls: blobUrls.length, downloadCalls }));
+  check('export notice names the zip and the import step',
+    /已导出 demo-memory-20261108-120000\.zip/.test(visibleText(exportTree)) && /导入记忆包/.test(visibleText(exportTree)),
+    visibleText(exportTree).slice(0, 300));
+  delete globalThis.Blob;
+  delete globalThis.document;
+}
+
+// Import picker: one click opens the project's picker (file dialog + fallback input).
+{
+  const pickHooks = [];
+  const pickCalls = makeFetch({ default: () => WITH_PROJECT });
+  const pickFirst = renderOnce(Page, pickHooks, seed);
+  await runEffects(pickFirst.effects);
+  const pickTree = renderOnce(Page, pickHooks, seed).tree;
+  const pickBtn = findButton(pickTree, '导入记忆包');
+  pickBtn.props.onClick();
+  const openedTree = renderOnce(Page, pickHooks, seed).tree;
+  // The picker is the ArchiveFileInput component (this renderer is shallow, so
+  // the component element itself is what to assert on; it renders the real
+  // <input type=file> in a browser and calls props.onPick with the chosen File).
+  const pickers = elements(openedTree).filter((n) => typeof n.type === 'function' && n.props && typeof n.props.onPick === 'function');
+  check('导入记忆包 opens an inline zip picker',
+    pickers.length === 1, `${pickers.length} pickers — ${visibleText(openedTree).slice(0, 240)}`);
+  check('the picker is disabled while the page is locked', pickers[0].props.disabled !== true);
+
+  // Feed a fake File through the picker and assert the binary POST target.
+  // The handler is async and then refreshes /status, so collect EVERY call.
+  const importCalls = [];
+  const file = { name: 'demo.zip', arrayBuffer: async () => new Uint8Array([0x50, 0x4b]).buffer };
+  globalThis.fetch = async (url, init) => {
+    importCalls.push({ url: String(url), init });
+    return { ok: true, status: 200, json: async () => ({ ok: true, message: '导入完成：写入 2 个文件', written: [], warnings: [] }) };
+  };
+  pickers[0].props.onPick(file);
+  for (let i = 0; i < 8; i++) await new Promise((r) => setTimeout(r, 0));
+  const importCall = importCalls.find((c) => c.url.includes('/projectImport'));
+  check('import POSTs the zip bytes to projectImport with the project name',
+    !!importCall && /\/projectImport\?project=demo$/.test(importCall.url) && importCall.init.method === 'POST',
+    JSON.stringify(importCalls.map((c) => c.url)));
+  check('the import body is the raw zip bytes (not a JSON wrapper)',
+    !!importCall && importCall.init.body instanceof ArrayBuffer, String(importCall && typeof importCall.init.body));
+  const importedTree = renderOnce(Page, pickHooks, seed).tree;
+  check('import notice shows the host message',
+    /导入完成：写入 2 个文件/.test(visibleText(importedTree)), visibleText(importedTree).slice(0, 260));
+}
 
 // Simulate a long migration: POST /projectMigrate never resolves, while the
 // status routes return a real host stage. Re-render must keep the refresh

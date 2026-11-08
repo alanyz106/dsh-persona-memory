@@ -3,7 +3,7 @@
 ```bash
 npm run typecheck                       # tsc host + client
 npm run build                           # dist/ + client/client.js
-node test/smoke.mjs                     # 主测试：399 项
+node test/smoke.mjs                     # 主测试：443 项
 node test/client-ui.mjs                 # 浏览器 bundle 契约测试
 node test/admin-fence.mjs               # 管理接口 loopback 围栏
 ```
@@ -34,6 +34,7 @@ node test/admin-fence.mjs               # 管理接口 loopback 围栏
 | `14-plugin-lifecycle` | 热重载不重复注册路由、项目段注入与 bootstrap 提示 |
 | `15-learning` | transcript 来源标注、项目摘要预算、学习提示词、轮次裁剪 |
 | `16-correct-command` | `/correct` 命令与 `/feedback` 解耦 |
+| `17-project-archive` | zip 编解码（CRC / 上限 / 解压炸弹）、导出→导入往返、恶意压缩包拒绝、.bak 与 .trash 保护 |
 
 ## 为什么 CI 仍只跑一个入口
 

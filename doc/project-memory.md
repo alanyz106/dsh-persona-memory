@@ -69,6 +69,24 @@
 - 写路由只接受注册表内的项目名，不接受浏览器传来的路径。
 - 「刷新」在任意请求处理中变成禁用的「处理中」，并配实时进度条；进度由 `GET /api/persona-memory/projectMigrateStatus` 每秒轮询。
 
+## 导出 / 导入记忆包（跨机器迁移）
+
+管理页项目卡的「导出记忆包 / 导入记忆包」把**一个项目**的记忆打包成 zip，在另一台机器上还原——不 commit、不经过 git，适合换机器、新 clone、或把记忆分享给同事。
+
+zip 结构（`lib/project-archive.ts`，无第三方依赖，读写实现在 `lib/zip.ts`）：
+
+```
+AGENTS.md          常驻区 + @memory/ 索引
+memory/<主题>.md   全部主题文件（含子目录）
+manifest.json      format=dsh-persona-memory/project-archive, version, project, exportedAt, 文件清单
+```
+
+- **导出** `POST /api/persona-memory/projectExport {project}` 直接返回 zip 字节（`content-type: application/zip` + `content-disposition`），页面把 Blob 交给浏览器下载，文件名 `<项目名>-memory-<YYYYMMDD-HHMMSS>.zip`。没有 AGENTS.md 的项目不能导出（索引就是记忆入口）。
+- **导入** `POST /api/persona-memory/projectImport?project=<注册表名>`，请求体是 zip 原始字节（**不是 JSON**，因此走 `readRawBody`，上限 `ARCHIVE_LIMITS.maxTotalBytes` = 32 MB）。页面点「导入记忆包」→ 内嵌 `ArchiveFileInput`（挂载即自动弹出系统选择框）→ 选中 zip 即上传。
+- **导入的闸门全部先于写盘**：zip 结构 / 路径 / 内容扫描 / 三档预算任一不过直接 400 + 可读原因，文件一个都不动。压缩包里 `memory/**.md` 之外的文件一律拒绝；单个顶层包裹目录（`zip -r demo.zip demo/`）会被自动剥掉。
+- **不毁数据**：旧 `AGENTS.md` 复制成 `AGENTS.md.bak-<时间戳>`，被覆盖的同名主题文件移入 `memory/.trash/`，响应里回传 `backup` / `trashed` / `warnings`（例如压缩包来自别的项目名、或索引指向的文件不在包内）。
+- 导入只写「记忆文件」，不动注册表：目标项目必须先登记（自动登记或手动登记）。
+
 ## 注册表
 
 记忆散落在各仓库，没有统一目录可扫，所以 `<dir>/project-registry.json` 记录见过的项目根（`name → root`）。管理页与备份都基于它；某个根消失时标记为 `missing` 而不删记录，恢复检出后自动重新可用。

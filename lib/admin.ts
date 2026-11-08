@@ -43,6 +43,7 @@ import {
 } from './project-memory.js';
 import { listRegistered, rootForName, registerProject, scanAndRegister, type RegisteredProject } from './project-registry.js';
 import { migrateAgents, type MigrationStage } from './project-migrate.js';
+import { buildProjectArchive, importProjectArchive, ARCHIVE_LIMITS } from './project-archive.js';
 import { projectGuideText } from './project-guide.js';
 import { scanContent } from './secret-scanner.js';
 import type { LlmRoute } from './llm-helper.js';
@@ -293,6 +294,32 @@ function writeJson(res: ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(body);
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'referrer-policy': 'no-referrer' });
   res.end(payload);
+}
+
+/** One binary response (the memory archive download). */
+function writeBinary(res: ServerResponse, status: number, body: Buffer, headers: Record<string, string>): void {
+  res.writeHead(status, Object.assign({
+    'content-type': 'application/octet-stream',
+    'content-length': String(body.length),
+    'referrer-policy': 'no-referrer',
+    // Same-origin fetch reads the body; `attachment` only matters if a browser
+    // opens the route directly, where the name should still be sensible.
+    'content-disposition': 'attachment; filename="memory.zip"',
+  }, headers));
+  res.end(body);
+}
+
+/** Read a raw request body with an explicit byte cap (zip uploads exceed the JSON cap). */
+async function readRawBody(req: IncomingMessage, maxBytes: number): Promise<Buffer | undefined> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of req) {
+    const buffer = chunk as Buffer;
+    size += buffer.length;
+    if (size > maxBytes) return undefined;
+    chunks.push(buffer);
+  }
+  return Buffer.concat(chunks);
 }
 
 /** Read a JSON request body (undefined when too large or unparseable). */
@@ -1382,6 +1409,54 @@ export function makeAdminRoutes(deps: AdminRouteDeps): WebRoute[] {
       // Always 200: a refused migration is a normal, repeatable outcome whose
       // reason the user needs to read. A 400 makes the page treat it as a
       // failed request and hides the explanation.
+      writeJson(res, 200, result);
+    } },
+    { kind: 'exact', path: '/api/persona-memory/projectExport', handler: async (req: IncomingMessage, res: ServerResponse) => {
+      if (!guard(req, res, 'POST')) return;
+      const body = await readJsonBody(req);
+      if (body === undefined) { writeJson(res, 400, { error: 'invalid JSON body' }); return; }
+      const name = String(body.project || '');
+      const root = projectRoot(name);
+      if (!root) { writeJson(res, 404, { error: '未知项目' }); return; }
+      try {
+        const archive = buildProjectArchive(root, name);
+        log(`admin: exported ${name} -> ${archive.filename} (${archive.files.length} files, ${archive.buffer.length} bytes)`);
+        // Raw zip bytes, not JSON: the page turns this into a Blob download.
+        writeBinary(res, 200, archive.buffer, {
+          'content-type': 'application/zip',
+          'content-disposition': `attachment; filename="${archive.filename}"`,
+          // Exposed to same-origin fetch for the notice line; the UI also knows
+          // the name client-side, so a missing header is harmless.
+          'x-archive-filename': archive.filename,
+          'x-archive-files': String(archive.files.length),
+        });
+      } catch (e) {
+        writeJson(res, 400, { error: e instanceof Error ? e.message : String(e) });
+      }
+    } },
+    { kind: 'exact', path: '/api/persona-memory/projectImport', handler: async (req: IncomingMessage, res: ServerResponse) => {
+      if (!guard(req, res, 'POST')) return;
+      const name = String(queryParam(new URL(req.url ?? '/', 'http://localhost'), 'project') || '');
+      const root = projectRoot(name);
+      if (!root) { writeJson(res, 404, { error: '未知项目' }); return; }
+      const raw = await readRawBody(req, ARCHIVE_LIMITS.maxTotalBytes + 1024 * 1024);
+      if (!raw) { writeJson(res, 413, { error: `压缩包过大（上限 ${ARCHIVE_LIMITS.maxTotalBytes} 字节）` }); return; }
+      if (raw.length === 0) { writeJson(res, 400, { error: '请求体为空：没有收到压缩包' }); return; }
+      const result = await importProjectArchive(root, raw, {
+        project: name,
+        scan: cfgBool(cfg, 'enableSecretScanning', true),
+        residentCharLimit: cfgNum(cfg, 'projectResidentCharLimit', 6000),
+        indexCharLimit: cfgNum(cfg, 'projectIndexCharLimit', 4000),
+        fileCharLimit: cfgNum(cfg, 'projectFileCharLimit', 20000),
+      });
+      // A rejected archive is a normal outcome whose reason the user must read:
+      // 400 with the message (the page prints it verbatim) — never a silent 200.
+      if (!result.ok) {
+        log(`admin: import ${name} refused: ${result.error}`);
+        writeJson(res, 400, { error: result.error, message: result.message, warnings: result.warnings });
+        return;
+      }
+      log(`admin: imported ${name}: ${result.written.length} topic files, backup=${result.backup ?? '-'}`);
       writeJson(res, 200, result);
     } },
     { kind: 'exact', path: '/api/persona-memory/projectRegister', handler: async (req: IncomingMessage, res: ServerResponse) => {

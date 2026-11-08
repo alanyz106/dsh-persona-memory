@@ -29,6 +29,7 @@ const suites = [
   '14-plugin-lifecycle.mjs',
   '15-learning.mjs',
   '16-correct-command.mjs',
+  '17-project-archive.mjs',
 ];
 
 for (const suite of suites) {

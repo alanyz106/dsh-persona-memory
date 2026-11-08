@@ -182,6 +182,43 @@ async function api(path: string, payload?: unknown, method?: string): Promise<an
   return body;
 }
 
+/**
+ * Hand a Blob to the browser as a download.
+ *
+ * Everything is feature-detected: the admin page also renders in the
+ * bundle-contract test (no `document`, no `URL.createObjectURL`), where this
+ * must be a no-op instead of a crash. Returns false when the download could
+ * not be started, so the caller can tell the user to use the raw route.
+ */
+function saveBlob(blob: Blob, filename: string): boolean {
+  try {
+    const doc = typeof document !== 'undefined' ? document : undefined;
+    const canUrl = typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function';
+    if (!doc || !canUrl) return false;
+    const url = URL.createObjectURL(blob);
+    const a = doc.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.rel = 'noopener';
+    doc.body.appendChild(a);
+    a.click();
+    doc.body.removeChild(a);
+    setTimeout(() => { try { URL.revokeObjectURL(url); } catch { /* already gone */ } }, 10_000);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** `demo-memory-20261108-231502.zip` — mirrors the host's naming so both agree. */
+function archiveFileName(project: string): string {
+  const d = new Date();
+  const p = (n: number): string => String(n).padStart(2, '0');
+  const stamp = `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+  const safe = (project || 'project').replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'project';
+  return `${safe}-memory-${stamp}.zip`;
+}
+
 // ----------------------------------------------------------- helpers
 
 function fmtBytes(n: number | undefined | null): string {
@@ -348,6 +385,34 @@ function TextArea(props: { value: string; onChange: (v: string) => void; placeho
   });
 }
 
+/**
+ * File input for the memory-archive import.
+ *
+ * Opens the OS file dialog on mount so one click on 「导入记忆包」 is enough, and
+ * stays a plain <input type=file> in every environment that lacks
+ * `HTMLInputElement.click()` (the bundle-contract test renders it directly).
+ */
+function ArchiveFileInput(props: { onPick: (file: File) => void; disabled?: boolean }): React.ReactElement {
+  const ref = React.useRef<HTMLInputElement | null>(null);
+  React.useLayoutEffect(() => {
+    const el = ref.current;
+    if (el && typeof el.click === 'function') {
+      try { el.click(); } catch { /* some browsers block programmatic pickers */ }
+    }
+  }, []);
+  return React.createElement('input', {
+    ref,
+    type: 'file',
+    accept: '.zip,application/zip',
+    disabled: props.disabled,
+    onChange: (e: React.ChangeEvent<HTMLInputElement>) => {
+      const f = e.target.files && e.target.files[0];
+      if (f) props.onPick(f);
+    },
+    style: { fontSize: 12, padding: '4px 0', color: 'var(--dsw-alias-label-primary)' },
+  });
+}
+
 function meter(pct: number): React.ReactElement {
   return React.createElement('div', {
     style: { height: 4, background: 'var(--dsw-alias-border-l1)', borderRadius: 2, overflow: 'hidden', margin: '4px 0 6px' },
@@ -424,6 +489,8 @@ function MemAdminPage(): React.ReactElement {
   const [projResidentEdit, setProjResidentEdit] = React.useState<ProjectResidentEditState | null>(null);
   const [projCreate, setProjCreate] = React.useState<ProjectCreateState | null>(null);
   const [projConfirm, setProjConfirm] = React.useState<{ project: string; file: string } | null>(null);
+  /** Project whose inline "选择压缩包" picker is open (import flow). */
+  const [archivePick, setArchivePick] = React.useState<string | null>(null);
   const [newProjectPath, setNewProjectPath] = React.useState('');
   /** parent directory to scan for repositories */
   const [scanPath, setScanPath] = React.useState('');
@@ -599,6 +666,7 @@ function MemAdminPage(): React.ReactElement {
       setProjResidentEdit(null);
       setProjCreate(null);
       setProjConfirm(null);
+      setArchivePick(null);
       setNewProjectPath('');
       setScanPath('');
       setStandingEdit(null);
@@ -648,6 +716,77 @@ function MemAdminPage(): React.ReactElement {
       setNotice('读取失败：' + String((e && (e as Error).message) || e));
     } finally {
       done();
+    }
+  };
+
+  /**
+   * Export one project's memory as a zip and trigger a browser download.
+   *
+   * Not routed through `mutate()`: the response is BINARY, so `api()` (which
+   * always parses JSON) would throw on the successful path. The request still
+   * joins the busy counter so the page-wide lock behaves like every other call.
+   */
+  const exportProject = async (proj: ProjectInfo) => {
+    if (busy) return;
+    const done = track('导出记忆包');
+    setError(null);
+    setNotice(null);
+    setLastOutcome(null);
+    try {
+      const res = await fetch('/api/persona-memory/projectExport', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ project: proj.name }),
+      });
+      if (!res.ok) {
+        let message = 'HTTP ' + res.status;
+        try {
+          const body = await res.json();
+          if (body && body.error) message = String(body.error);
+        } catch { /* non-JSON error body */ }
+        throw new Error(message);
+      }
+      const blob = await res.blob();
+      const headerName = res.headers && typeof res.headers.get === 'function' ? res.headers.get('x-archive-filename') : '';
+      const filename = headerName || archiveFileName(proj.name);
+      const saved = saveBlob(blob, filename);
+      setNotice(saved
+        ? `已导出 ${filename}（${fmtBytes(blob.size)}）：在另一台机器用「导入记忆包」选它即可还原该项目的记忆`
+        : `已生成 ${filename}（${fmtBytes(blob.size)}），但浏览器未允许自动下载；请换用 Chrome/Edge 再试`);
+    } catch (e) {
+      setNotice('导出失败：' + String((e && (e as Error).message) || e));
+    } finally {
+      done();
+    }
+  };
+
+  /** Import a chosen zip into `project` (archive read happens host-side). */
+  const importProject = async (project: string, file: File) => {
+    if (busy) return;
+    const done = track('导入记忆包');
+    setError(null);
+    setNotice(null);
+    setLastOutcome(null);
+    try {
+      const buffer = await file.arrayBuffer();
+      const res = await fetch('/api/persona-memory/projectImport?project=' + encodeURIComponent(project), {
+        method: 'POST',
+        headers: { 'content-type': 'application/zip' },
+        body: buffer,
+      });
+      let body: any = null;
+      try { body = await res.json(); } catch { /* empty body */ }
+      if (!res.ok) throw new Error((body && (body.error || body.message)) || 'HTTP ' + res.status);
+      const warnings = body && Array.isArray(body.warnings) && body.warnings.length
+        ? '（注意：' + body.warnings.join('；') + '）'
+        : '';
+      setNotice(((body && body.message) || '导入完成') + warnings);
+      setProjOpen(project);
+    } catch (e) {
+      setNotice('导入失败：' + String((e && (e as Error).message) || e));
+    } finally {
+      done();
+      await load(); // the index / resident block / topic list all changed
     }
   };
 
@@ -961,6 +1100,22 @@ function MemAdminPage(): React.ReactElement {
                 )),
               )
             : null,
+          // ---- archive import picker (inline: no DOM file dialog, so the
+          // bundle-contract test can render this state too)
+          archivePick === proj.name
+            ? React.createElement('div', { style: { margin: '10px 0', padding: 8, border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 6 } },
+                React.createElement('div', { style: { fontSize: 12, fontWeight: 600, marginBottom: 4 } }, '导入记忆包到 ' + proj.name),
+                React.createElement('div', { style: { fontSize: 11, color: 'var(--dsw-alias-label-secondary)', marginBottom: 6, lineHeight: 1.5 } },
+                  '选择之前用「导出记忆包」得到的 zip。会写入 AGENTS.md 与 memory/ 下的文件：原 AGENTS.md 另存 .bak，同名主题文件移入 memory/.trash。'),
+                React.createElement(ArchiveFileInput, {
+                  disabled: locked,
+                  onPick: (f: File) => { void importProject(proj.name, f); },
+                }),
+                React.createElement('div', { style: { display: 'flex', gap: 8, marginTop: 6 } },
+                  actionBtn('取消', () => setArchivePick(null)),
+                ),
+              )
+            : null,
           // ---- create
           creating
             ? React.createElement('div', { style: { margin: '10px 0', padding: 8, border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 6 } },
@@ -999,6 +1154,20 @@ function MemAdminPage(): React.ReactElement {
                       },
                       title: migrationReason,
                     }),
+                  // Archive export/import: the zip carries AGENTS.md + memory/**
+                  // so the same project's memory can be restored on another
+                  // machine without committing anything.
+                  actionBtn('导出记忆包', () => exportProject(proj), {
+                    disabled: !proj.exists,
+                    style: { padding: '3px 10px', fontSize: 12, opacity: proj.exists ? 1 : 0.4 },
+                    title: proj.exists
+                      ? '把该项目当前 AGENTS.md + memory/ 全部内容打包成 zip 下载'
+                      : '该项目还没有 AGENTS.md，没有可导出的记忆',
+                  }),
+                  actionBtn('导入记忆包', () => { setArchivePick(archivePick === proj.name ? null : proj.name); setProjCreate(null); setProjEdit(null); setProjResidentEdit(null); }, {
+                    style: { padding: '3px 10px', fontSize: 12 },
+                    title: '选择之前导出的 zip，用它的内容覆盖本项目的 AGENTS.md 与 memory/ 同名文件（原文件会备份 / 进 .trash）',
+                  }),
                 ),
                 React.createElement('div', { style: { fontSize: 11, color: noLlmRoute ? 'var(--dsw-alias-state-warn-primary)' : 'var(--dsw-alias-label-secondary)', marginTop: 4, lineHeight: 1.5 } },
                   migratedAlready
@@ -1008,6 +1177,8 @@ function MemAdminPage(): React.ReactElement {
                       : canMigrate
                         ? `使用 ${routeLabel} 拆分「常驻区 + 索引」，原文另存 .bak；规划超时 ${timeoutLabel}，可在插件配置里调整。`
                         : '该项目还没有 AGENTS.md。'),
+                React.createElement('div', { style: { fontSize: 11, color: 'var(--dsw-alias-label-secondary)', marginTop: 2, lineHeight: 1.5 } },
+                  '导出/导入用于换机器迁移同一个项目的记忆：zip 内是 AGENTS.md + memory/ 主题文件。导入会覆盖同名文件，旧的 AGENTS.md 另存 .bak、旧主题文件移入 memory/.trash。'),
               ),
         ) : null,
       ));
