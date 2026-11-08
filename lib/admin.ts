@@ -42,7 +42,7 @@ import {
   type ProjectIndex,
 } from './project-memory.js';
 import { listRegistered, rootForName, registerProject, scanAndRegister, type RegisteredProject } from './project-registry.js';
-import { migrateAgents } from './project-migrate.js';
+import { migrateAgents, type MigrationStage } from './project-migrate.js';
 import { projectGuideText } from './project-guide.js';
 import { scanContent } from './secret-scanner.js';
 import type { LlmRoute } from './llm-helper.js';
@@ -806,6 +806,22 @@ export interface AdminRouteDeps {
   log: (s: string) => void;
 }
 
+/** Live state of the admin page's one migration at a time. */
+export interface MigrationProgress {
+  active: boolean;
+  project?: string;
+  stage?: MigrationStage;
+  /** Human-readable current stage detail; also logged to the plugin's file log. */
+  detail?: string;
+  startedAt?: number;
+  finishedAt?: number;
+  elapsedMs?: number;
+  outcome?: 'completed' | 'refused' | 'failed';
+  reason?: string;
+  written?: string[];
+  backup?: string;
+}
+
 type MutateOutcome = { ok: true; message: string; entryCount?: number } | { ok: false; error: string };
 type StoreChange = (list: DecodedEntry[]) => { next?: DecodedEntry[]; error?: string; message?: string };
 type StandingChange = (list: string[]) => { next?: string[]; error?: string; message?: string };
@@ -815,6 +831,20 @@ type StandingChange = (list: string[]) => { next?: string[]; error?: string; mes
  */
 export function makeAdminRoutes(deps: AdminRouteDeps): WebRoute[] {
   const { store, standing, cfg, vector, profilePatch, log } = deps;
+
+  /**
+   * The admin page needs an honest answer to "处理中是真的在处理吗？". One
+   * migration at a time: it rewrites AGENTS.md, so a second concurrent run
+   * (another tab, or a fast double click) must be refused, not interleaved.
+   * The state is in the host process, so every tab sees the same progress.
+   */
+  let migration: MigrationProgress = { active: false };
+  function migrationSnapshot(): MigrationProgress {
+    return {
+      ...migration,
+      elapsedMs: migration.active && migration.startedAt ? Date.now() - migration.startedAt : migration.elapsedMs,
+    };
+  }
 
   /**
    * Guard helper: fence + method check.
@@ -1018,6 +1048,7 @@ export function makeAdminRoutes(deps: AdminRouteDeps): WebRoute[] {
     const stores = summarizeStores();
     const standingInfo = standingSnapshot();
     const dir = resolveMemoryDir(cfg);
+    const route = deps.getRoute?.();
     return {
       dir,
       which: String(dir).includes('.pi') ? 'pi-shared' : 'dsh-only',
@@ -1035,6 +1066,9 @@ export function makeAdminRoutes(deps: AdminRouteDeps): WebRoute[] {
       models: listModels(),
       projects: listProjects(),
       entries: listEntries(),
+      /** Migration needs the auxiliary LLM route; without one the UI disables the button. */
+      llmRouteAvailable: !!route,
+      migration: migrationSnapshot(),
       ts: Date.now(),
     };
   }
@@ -1088,6 +1122,12 @@ export function makeAdminRoutes(deps: AdminRouteDeps): WebRoute[] {
     { kind: 'exact', path: '/api/persona-memory/projectGuide', handler: async (req: IncomingMessage, res: ServerResponse) => {
       if (!guard(req, res, 'GET')) return;
       writeJson(res, 200, { guide: projectGuideText() });
+    } },
+    /** Lightweight progress poll: never blocks on the LLM call, so the page
+     *  can show a real stage + elapsed time while the mutation is in flight. */
+    { kind: 'exact', path: '/api/persona-memory/projectMigrateStatus', handler: async (req: IncomingMessage, res: ServerResponse) => {
+      if (!guard(req, res, 'GET')) return;
+      writeJson(res, 200, { migration: migrationSnapshot(), llmRouteAvailable: !!deps.getRoute?.() });
     } },
     { kind: 'exact', path: '/api/persona-memory/checkModel', handler: async (req: IncomingMessage, res: ServerResponse) => {
       if (!guard(req, res, 'GET')) return;
@@ -1285,22 +1325,56 @@ export function makeAdminRoutes(deps: AdminRouteDeps): WebRoute[] {
       if (body === undefined) { writeJson(res, 400, { error: 'invalid JSON body' }); return; }
       const root = projectRoot(String(body.project || ''));
       if (!root) { writeJson(res, 404, { error: '未知项目' }); return; }
+      // Single-flight: AGENTS.md must not be rewritten by two LLM planners at
+      // once (another tab, or a double click). The in-flight state is also what
+      // the progress poll reads.
+      if (migration.active) {
+        writeJson(res, 200, {
+          migrated: false,
+          reason: `已有迁移正在处理（${migration.project || '另一个项目'}，${migration.stage || 'starting'}），请等待完成或查看进度后再试`,
+        });
+        return;
+      }
+      const startedAt = Date.now();
+      migration = { active: true, project: path.basename(root), stage: 'starting', startedAt };
+      log(`admin: migrate start ${root}`);
+      let result: Awaited<ReturnType<typeof migrateAgents>>;
       try {
-        const result = await migrateAgents(deps.ctx, root, deps.getRoute?.(), {
+        result = await migrateAgents(deps.ctx, root, deps.getRoute?.(), {
           apply: body.apply === true,
           scan: cfgBool(cfg, 'enableSecretScanning', true),
           fileCharLimit: cfgNum(cfg, 'projectFileCharLimit', 20000),
           residentCharLimit: cfgNum(cfg, 'projectResidentCharLimit', 3000),
           indexCharLimit: cfgNum(cfg, 'projectIndexCharLimit', 4000),
+          onProgress: ({ stage, detail }) => {
+            migration = { ...migration, stage, detail, elapsedMs: Date.now() - startedAt };
+            log(`admin: migrate ${root} stage=${stage}${detail ? ' ' + detail : ''}`);
+          },
         });
-        log(`admin: migrate ${root} -> ${result.migrated ? 'applied' : result.reason}`);
-        // Always 200: a refused migration is a normal, repeatable outcome whose
-        // reason the user needs to read. A 400 makes the page treat it as a
-        // failed request and hides the explanation.
-        writeJson(res, 200, result);
       } catch (e) {
-        writeJson(res, 500, { error: e instanceof Error ? e.message : String(e) });
+        const reason = e instanceof Error ? e.message : String(e);
+        migration = { ...migration, active: false, stage: 'failed', reason, finishedAt: Date.now(), elapsedMs: Date.now() - startedAt };
+        log(`admin: migrate ${root} -> error: ${reason}`);
+        writeJson(res, 500, { error: reason });
+        return;
       }
+      const outcome = result.migrated ? 'completed' : (result.reason === 'preview' ? 'refused' : (migration.stage === 'failed' ? 'failed' : 'refused'));
+      migration = {
+        ...migration,
+        active: false,
+        stage: outcome === 'completed' ? 'completed' : (migration.stage === 'failed' ? 'failed' : 'refused'),
+        outcome,
+        reason: result.reason,
+        written: result.written,
+        backup: result.backup,
+        finishedAt: Date.now(),
+        elapsedMs: Date.now() - startedAt,
+      };
+      log(`admin: migrate ${root} -> ${result.migrated ? 'applied' : result.reason}`);
+      // Always 200: a refused migration is a normal, repeatable outcome whose
+      // reason the user needs to read. A 400 makes the page treat it as a
+      // failed request and hides the explanation.
+      writeJson(res, 200, result);
     } },
     { kind: 'exact', path: '/api/persona-memory/projectRegister', handler: async (req: IncomingMessage, res: ServerResponse) => {
       if (!guard(req, res, 'POST')) return;

@@ -1031,7 +1031,7 @@ const routes = makeAdminRoutes({
   profilePatch: path.join(testDir, 'cordis.patch.yml'),
   log: () => {},
 });
-check('admin exposes the project route family', ['projectRead', 'projectWrite', 'projectCreate', 'projectDelete', 'projectResident', 'projectMigrate', 'projectRegister', 'projectGuide']
+check('admin exposes the project route family', ['projectRead', 'projectWrite', 'projectCreate', 'projectDelete', 'projectResident', 'projectMigrate', 'projectMigrateStatus', 'projectRegister', 'projectGuide']
   .every((name) => routes.some((r) => r.path === `/api/persona-memory/${name}`)));
 
 // 25a. the restore route restores the snapshot it is asked for (by name)
@@ -1114,6 +1114,104 @@ check('admin exposes the project route family', ['projectRead', 'projectWrite', 
   const payload = JSON.parse(res.body || '{}');
   check('refused migration answers 200, not 400', res.statusCode === 200, String(res.statusCode));
   check('refused migration carries a readable reason', typeof payload.reason === 'string' && payload.reason.length > 0, payload.reason);
+  // The progress route must report a FINISHED state, not leave the page "busy"
+  // forever after a refused migration.
+  const statusRoute = migRoutes.find((r) => r.path === '/api/persona-memory/projectMigrateStatus');
+  const statusRes = { statusCode: 0, body: '', setHeader() {}, writeHead(c) { this.statusCode = c; }, end(b) { this.body = String(b); } };
+  await statusRoute.handler({ method: 'GET', url: '/', headers: { host: '127.0.0.1:3080' }, socket: { remoteAddress: '127.0.0.1' } }, statusRes);
+  const after = JSON.parse(statusRes.body || '{}').migration || {};
+  check('migration progress clears after a refusal', after.active === false && after.outcome === 'refused', JSON.stringify(after));
+  const statusPayloadRoute = migRoutes.find((r) => r.path === '/api/persona-memory/status');
+  const adminStatus = await (async () => {
+    const req = { method: 'GET', url: '/', headers: { host: '127.0.0.1:3080' }, socket: { remoteAddress: '127.0.0.1' } };
+    const res = { statusCode: 0, body: '', setHeader() {}, writeHead(c) { this.statusCode = c; }, end(b) { this.body = String(b); } };
+    await statusPayloadRoute.handler(req, res);
+    return JSON.parse(res.body || '{}');
+  })();
+  check('status payload exposes whether an LLM route exists',
+    adminStatus.llmRouteAvailable === false && adminStatus.migration && adminStatus.migration.active === false,
+    JSON.stringify({ llmRouteAvailable: adminStatus.llmRouteAvailable, migration: adminStatus.migration }));
+}
+
+// 25c. admin migration: single-flight + real stage progress while the planner runs
+{
+  const progDir = fs.mkdtempSync(path.join(testDir, 'prog-'));
+  const progRepo = fs.mkdtempSync(path.join(testDir, 'progrepo-'));
+  fs.mkdirSync(path.join(progRepo, '.git'));
+  fs.writeFileSync(path.join(progRepo, 'AGENTS.md'), '# 项目规则\n\n## 构建\nnpm run build\n\n## 部署\nsystemctl restart app\n');
+  registerProject(progDir, progRepo);
+  let releasePlanner;
+  const plannerGate = new Promise((resolve) => { releasePlanner = resolve; });
+  const plan = JSON.stringify({
+    resident: ['# 项目规则', '- 构建：npm run build'],
+    files: [{ file: 'memory/deploy.md', summary: '部署', content: '# 部署\n\nsystemctl restart app\n' }],
+  });
+  const stages = [];
+  // The host's real planner path is ctx.llm.stream (see lib/llm-helper.ts).
+  // Holding this generator at a gate makes the LLM call observably in flight
+  // while the progress route is polled.
+  const slowCtx = {
+    logger: { warn() {}, info() {} },
+    llm: {
+      stream: async function* () {
+        await plannerGate;
+        yield { type: 'text-delta', text: plan };
+      },
+    },
+  };
+  const progRoutes = makeAdminRoutes({
+    store: createMemoryStore({ dir: progDir, limits: BIG_LIMITS }),
+    standing: createStandingStore({ dir: progDir, maxEntries: 20, maxChars: 2000 }),
+    vector: {},
+    cfg: { dir: progDir, autoBackupMin: 0 },
+    ctx: slowCtx,
+    getRoute: () => ({ provider: 'p', model: 'm' }),
+    profilePatch: path.join(testDir, 'prog.yml'),
+    log: (line) => stages.push(line),
+  });
+  const makeRes = () => ({ statusCode: 0, body: '', setHeader() {}, writeHead(c) { this.statusCode = c; }, end(b) { this.body = String(b); } });
+  const call = async (route, body, method = 'POST') => {
+    const req = {
+      method, url: '/',
+      headers: { host: '127.0.0.1:3080' }, socket: { remoteAddress: '127.0.0.1' },
+      [Symbol.asyncIterator]: async function* () {
+        if (body !== undefined) yield Buffer.from(JSON.stringify(body));
+      },
+    };
+    const res = makeRes();
+    await route.handler(req, res);
+    return { status: res.statusCode, payload: JSON.parse(res.body || '{}') };
+  };
+  const migrateRoute = progRoutes.find((r) => r.path === '/api/persona-memory/projectMigrate');
+  const statusRoute = progRoutes.find((r) => r.path === '/api/persona-memory/projectMigrateStatus');
+  const statusAdmin = progRoutes.find((r) => r.path === '/api/persona-memory/status');
+
+  const reqBody = { project: path.basename(progRepo), apply: true };
+  const running = call(migrateRoute, reqBody);
+  // The route reads the request body before starting the planner; give it a
+  // few macrotasks to reach the gated LLM call.
+  for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
+  const inFlight = await call(statusRoute, undefined, 'GET');
+  check('migration progress reports a real stage while the planner runs',
+    inFlight.payload.migration.active === true && inFlight.payload.migration.stage === 'planning',
+    JSON.stringify(inFlight.payload.migration));
+  check('status payload reports an available LLM route',
+    (await call(statusAdmin, undefined, 'GET')).payload.llmRouteAvailable === true);
+  const second = await call(migrateRoute, reqBody);
+  check('a second migration is refused while one is in flight',
+    second.status === 200 && second.payload.migrated === false && /已有迁移正在处理/.test(second.payload.reason),
+    second.payload.reason);
+  releasePlanner();
+  const finished = await running;
+  check('the in-flight migration eventually completes', finished.status === 200 && finished.payload.migrated === true,
+    JSON.stringify(finished.payload));
+  const after = await call(statusRoute, undefined, 'GET');
+  check('migration progress clears after completion',
+    after.payload.migration.active === false && after.payload.migration.outcome === 'completed',
+    JSON.stringify(after.payload.migration));
+  check('migration stages are logged for diagnosis',
+    stages.some((line) => line.includes('stage=planning')) && stages.some((line) => line.includes('stage=completed')),
+    String(stages.length));
 }
 
 // 26. migrateAgents end-to-end (planner injected; validation gates enforced)
@@ -1144,6 +1242,27 @@ check('migration keeps resident rules', migIndex.resident.join('\n').includes('�
 check('migration writes the topic file', fs.readFileSync(path.join(migRoot, 'memory', 'deploy.md'), 'utf8').includes('systemctl'));
 check('migration indexes the topic', migIndex.entries.length === 1 && migIndex.entries[0].file === 'memory/deploy.md');
 check('migration left a backup of the original', migOk.backup !== undefined && fs.existsSync(path.join(migRoot, migOk.backup)));
+
+// a migration with no model route must say what to do, in words a user can act on
+const migNoRouteRoot = fs.mkdtempSync(path.join(testDir, 'mignoroute-'));
+fs.writeFileSync(path.join(migNoRouteRoot, 'AGENTS.md'), '# 规则\n\n## 构建\nnpm run build\n');
+const migNoRoute = await migrateAgents(migCtx, migNoRouteRoot, undefined, { apply: true });
+check('missing LLM route gives an actionable reason',
+  migNoRoute.migrated === false && /会话请求/.test(migNoRoute.reason || '') && !/no-llm-route/.test(migNoRoute.reason || ''),
+  migNoRoute.reason);
+
+// progress callbacks must expose the long LLM stage before any disk write
+const migProgressRoot = fs.mkdtempSync(path.join(testDir, 'migprogress-'));
+fs.writeFileSync(path.join(migProgressRoot, 'AGENTS.md'), '# 项目规则\n\n## 构建\nnpm run build\n\n## 部署\nsystemctl restart app\n');
+const seenStages = [];
+const progOk = await migrateAgents(migCtx, migProgressRoot, { provider: 'p', model: 'm' }, {
+  apply: true, scan: true, fileCharLimit: 20000, residentCharLimit: 3000, indexCharLimit: 4000,
+  plan: async () => migReply,
+  onProgress: ({ stage }) => seenStages.push(stage),
+});
+check('migration reports planning and completion stages',
+  progOk.migrated === true && seenStages.includes('planning') && seenStages.includes('completed'),
+  seenStages.join(','));
 
 // a lossy plan must leave the file untouched
 const migRoot2 = fs.mkdtempSync(path.join(testDir, 'mig2-'));

@@ -47,7 +47,10 @@ jobs:
         run: npm run build
 
       - name: Run smoke tests
-        run: node test/smoke.mjs
+        run: |
+          node test/smoke.mjs
+          node test/admin-fence.mjs
+          node test/client-ui.mjs
 
       - name: Pack tarball
         # npm pack runs prepublishOnly (build again — cheap and proves the

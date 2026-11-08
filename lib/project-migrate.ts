@@ -52,6 +52,20 @@ export interface MigrationResult {
   backup?: string;
 }
 
+/** Stages of one migration run, surfaced to the admin page while the planner runs. */
+export type MigrationStage =
+  | 'starting'
+  | 'checking'
+  | 'planning'
+  | 'validating'
+  | 'writing'
+  | 'completed'
+  | 'refused'
+  | 'failed';
+
+/** Progress callback — best-effort; a broken reporter must never fail a migration. */
+export type MigrationProgressFn = (progress: { stage: MigrationStage; detail?: string }) => void;
+
 const MIGRATION_SYSTEM_PROMPT = `You restructure an existing project instruction document into "resident rules + lazy-loaded topic files".
 
 Resident block (goes at the top of AGENTS.md, injected into every request):
@@ -258,14 +272,30 @@ export async function migrateAgents(
     apply?: boolean;
     timeoutMs?: number;
     force?: boolean;
+    /** Progress reporter for the long LLM call; the admin page polls it. */
+    onProgress?: MigrationProgressFn;
     /** override the planner call (tests inject a fixture; production uses callLlm) */
     plan?: (prompt: string) => Promise<string>;
   } = {},
 ): Promise<MigrationResult> {
+  const report = (stage: MigrationStage, detail?: string): void => {
+    try { opts.onProgress?.({ stage, detail }); } catch { /* reporting is best-effort */ }
+  };
+  const refuse = (reason: string, plan?: MigrationPlan): MigrationResult => {
+    report('refused', reason);
+    return { migrated: false, reason, plan };
+  };
+  const fail = (reason: string, plan?: MigrationPlan): MigrationResult => {
+    report('failed', reason);
+    return { migrated: false, reason, plan };
+  };
+
+  report('starting');
+  report('checking');
   const index = readIndex(root);
-  if (!index.exists) return { migrated: false, reason: 'AGENTS.md 不存在' };
+  if (!index.exists) return refuse('AGENTS.md 不存在');
   if (index.resident.length === 0 && !opts.force) {
-    return { migrated: false, reason: 'AGENTS.md 已经是纯索引形态，无需迁移' };
+    return refuse('AGENTS.md 已经是纯索引形态，无需迁移');
   }
   // Migration is a ONE-SHOT transformation of a prose document. A file that
   // already carries index entries has been migrated: its remaining body text
@@ -273,30 +303,32 @@ export async function migrateAgents(
   // sees that body. Re-running would replace the whole index with entries for
   // those few resident rules and orphan every existing topic file.
   if (index.entries.length > 0 && !opts.force) {
-    return {
-      migrated: false,
-      reason: `AGENTS.md 已有 ${index.entries.length} 条 @memory/ 索引，属于迁移后形态；常驻区如需继续拆分请手动编辑（迁移只处理纯散文文档）`,
-    };
+    return refuse(`AGENTS.md 已有 ${index.entries.length} 条 @memory/ 索引，属于迁移后形态；常驻区如需继续拆分请手动编辑（迁移只处理纯散文文档）`);
   }
-  if (!route) return { migrated: false, reason: 'no-llm-route' };
+  if (!route) {
+    return refuse('还没有可用的模型路由：请先在 dsh web 里发一次会话请求，让插件记录当前会话使用的 provider/model，然后重试迁移');
+  }
 
   const original = index.resident.join('\n');
-  if (!original.trim()) return { migrated: false, reason: '没有可迁移的内容' };
+  if (!original.trim()) return refuse('没有可迁移的内容');
 
+  report('planning', `调用 ${route.provider}/${route.model} 规划拆分（最长 ${Math.round((opts.timeoutMs ?? 120_000) / 1000)} 秒）`);
   let reply: string;
   try {
     reply = opts.plan
       ? await opts.plan(buildPrompt(original))
       : await callLlm(ctx, route, MIGRATION_SYSTEM_PROMPT, buildPrompt(original), opts.timeoutMs ?? 120_000);
   } catch (err) {
-    return { migrated: false, reason: `调用模型失败：${(err as Error | undefined)?.message ?? String(err)}` };
+    return fail(`调用模型失败：${(err as Error | undefined)?.message ?? String(err)}`);
   }
   const plan = parsePlan(reply);
-  if (!plan) return { migrated: false, reason: '模型返回的计划无法解析' };
+  if (!plan) return fail('模型返回的计划无法解析');
+  report('validating', '校验标题保全、内容扫描、路径与字符预算');
   const invalid = validatePlan(root, original, plan, opts);
-  if (invalid) return { migrated: false, reason: invalid, plan };
-  if (opts.apply === false) return { migrated: false, reason: 'preview', plan };
+  if (invalid) return refuse(invalid, plan);
+  if (opts.apply === false) return refuse('preview', plan);
 
+  report('writing', `写入 ${plan.files.length} 个主题文件并更新 AGENTS.md 索引`);
   // Keep a copy of the pre-migration file: an LLM rewrite must never be the
   // only record of the author's original rules.
   const backup = backupName();
@@ -309,7 +341,7 @@ export async function migrateAgents(
   const written: string[] = [];
   for (const file of plan.files) {
     const result = await writeMemoryFile(root, file.file, file.content, opts.fileCharLimit);
-    if (!result.ok) return { migrated: false, reason: result.error, plan };
+    if (!result.ok) return fail(result.error, plan);
     written.push(result.file);
   }
   // Normalize planned paths BEFORE comparing with existing entries: the model
@@ -333,7 +365,8 @@ export async function migrateAgents(
     residentCharLimit: opts.residentCharLimit,
     indexCharLimit: opts.indexCharLimit,
   });
-  if (!wrote.ok) return { migrated: false, reason: wrote.error, plan };
+  if (!wrote.ok) return fail(wrote.error, plan);
+  report('completed', `新建 ${written.length} 个主题文件，原文备份为 ${backup}`);
   return { migrated: true, plan, written, backup };
 }
 

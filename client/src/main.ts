@@ -51,7 +51,26 @@ interface StatusPayload {
   models: { dir: string; models: Array<{ name: string }> };
   projects: ProjectInfo[];
   entries: Record<string, EntryItem[]>;
+  /** Auxiliary LLM route for the AGENTS.md migration planner, if any session has issued a request yet. */
+  llmRouteAvailable?: boolean;
+  /** A migration currently occupying the host's single-flight slot. */
+  migration?: MigrationStatus | null;
   ts: number;
+}
+
+interface MigrationStatus {
+  active: boolean;
+  project?: string;
+  stage?: string;
+  /** Host's human-readable stage detail (model route, file count, reason…). */
+  detail?: string;
+  startedAt?: number;
+  elapsedMs?: number;
+  finishedAt?: number;
+  outcome?: 'completed' | 'refused' | 'failed';
+  reason?: string;
+  written?: string[];
+  backup?: string;
 }
 
 interface EditingState {
@@ -124,6 +143,13 @@ interface ModelStatusState {
   path?: string;
 }
 
+/** One in-flight host mutation. A counter, not a boolean: a short overlapping
+ *  request must never clear the busy state of a long migration. */
+interface PendingTask {
+  label: string;
+  startedAt: number;
+}
+
 // ------------------------------------------------------------- api
 
 /** One JSON call to the host route family. */
@@ -163,14 +189,58 @@ function fmtBytes(n: number | undefined | null): string {
   return (n / 1048576).toFixed(1) + ' MB';
 }
 
+/** Actions that can take a while (LLM planning) get a distinct, honest label. */
+const ACTION_LABELS: Record<string, string> = {
+  projectMigrate: '迁移旧 AGENTS.md',
+  projectScan: '扫描目录',
+  rebuildVector: '重建向量索引',
+  backup: '立即备份',
+  restoreLatest: '恢复备份',
+  configSave: '保存配置',
+};
+
+function actionLabel(action: string): string {
+  return ACTION_LABELS[action] || '保存';
+}
+
+/** Human-friendly host stage names. Unknown/new stages pass through as-is. */
+const STAGE_LABELS: Record<string, string> = {
+  starting: '准备迁移',
+  checking: '检查 AGENTS.md 形态',
+  planning: '调用模型规划拆分（最长 120 秒）',
+  validating: '校验计划（标题保全 / 预算 / 路径）',
+  writing: '写入主题文件与索引',
+  completed: '迁移完成',
+  refused: '迁移被拒绝',
+  failed: '迁移失败',
+};
+
+function stageLabel(stage?: string): string {
+  return stage ? (STAGE_LABELS[stage] || stage) : '';
+}
+
+/** `已等待 1 分 03 秒` — proves the long request is still alive. */
+function fmtElapsed(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const min = Math.floor(total / 60);
+  const sec = total % 60;
+  return min > 0 ? `已等待 ${min} 分 ${String(sec).padStart(2, '0')} 秒` : `已等待 ${sec} 秒`;
+}
+
+/**
+ * Shared button renderer. `disabled` is forwarded to the DOM button, so a
+ * click during an in-flight mutation cannot fire its handler at all (the old
+ * "处理中" refresh button was still clickable and re-ran the load).
+ */
 function btn(
   label: React.ReactNode,
   onClick: () => void,
   opts?: { disabled?: boolean; style?: React.CSSProperties; title?: string },
 ): React.ReactElement {
+  const disabled = !!(opts && opts.disabled);
   return React.createElement('button', {
-    onClick,
-    disabled: opts && opts.disabled,
+    onClick: disabled ? undefined : onClick,
+    disabled,
     title: opts && opts.title,
     style: Object.assign({
       padding: '5px 12px',
@@ -179,7 +249,8 @@ function btn(
       border: '1px solid var(--dsw-alias-border-l2)',
       background: 'var(--dsw-alias-bg-layer-1)',
       color: 'var(--dsw-alias-label-primary)',
-      cursor: opts && opts.disabled ? 'default' : 'pointer',
+      cursor: disabled ? 'not-allowed' : 'pointer',
+      opacity: disabled ? 0.5 : 1,
     }, opts && opts.style),
   }, label);
 }
@@ -193,11 +264,12 @@ function fmtStamp(iso: string): string {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
-function input(value: unknown, onChange: (v: string) => void, placeholder?: string): React.ReactElement {
+function input(value: unknown, onChange: (v: string) => void, placeholder?: string, disabled?: boolean): React.ReactElement {
   return React.createElement('input', {
     value: value === undefined || value === null ? '' : (value as string | number),
     onChange: (e: React.ChangeEvent<HTMLInputElement>) => onChange(e.target.value),
     placeholder,
+    disabled,
     style: {
       width: '100%',
       boxSizing: 'border-box',
@@ -207,16 +279,18 @@ function input(value: unknown, onChange: (v: string) => void, placeholder?: stri
       border: '1px solid var(--dsw-alias-border-l2)',
       background: 'var(--dsw-alias-bg-layer-1)',
       color: 'var(--dsw-alias-label-primary)',
+      opacity: disabled ? 0.6 : 1,
     },
   });
 }
 
-function numberInput(value: unknown, onChange: (v: string) => void, placeholder?: string): React.ReactElement {
+function numberInput(value: unknown, onChange: (v: string) => void, placeholder?: string, disabled?: boolean): React.ReactElement {
   return React.createElement('input', {
     type: 'number',
     value: value === undefined || value === null ? '' : (value as string | number),
     onChange: (e: React.ChangeEvent<HTMLInputElement>) => onChange(e.target.value),
     placeholder,
+    disabled,
     style: {
       width: '100%',
       boxSizing: 'border-box',
@@ -226,6 +300,7 @@ function numberInput(value: unknown, onChange: (v: string) => void, placeholder?
       border: '1px solid var(--dsw-alias-border-l2)',
       background: 'var(--dsw-alias-bg-layer-1)',
       color: 'var(--dsw-alias-label-primary)',
+      opacity: disabled ? 0.6 : 1,
     },
   });
 }
@@ -234,7 +309,7 @@ function numberInput(value: unknown, onChange: (v: string) => void, placeholder?
 // 最小 3 行，最大 300px 内滚动；内容变化时重新测量。
 // 必须是独立组件：hooks（useRef/useLayoutEffect）归属组件自身，
 // 写成普通函数会在条件渲染时崩 React error #310。
-function TextArea(props: { value: string; onChange: (v: string) => void; placeholder?: string }): React.ReactElement {
+function TextArea(props: { value: string; onChange: (v: string) => void; placeholder?: string; disabled?: boolean }): React.ReactElement {
   const ref = React.useRef<HTMLTextAreaElement | null>(null);
   React.useLayoutEffect(() => {
     const el = ref.current;
@@ -248,6 +323,7 @@ function TextArea(props: { value: string; onChange: (v: string) => void; placeho
     onChange: (e: React.ChangeEvent<HTMLTextAreaElement>) => props.onChange(e.target.value),
     placeholder: props.placeholder,
     rows: 3,
+    disabled: props.disabled,
     style: {
       width: '100%',
       boxSizing: 'border-box',
@@ -265,6 +341,7 @@ function TextArea(props: { value: string; onChange: (v: string) => void; placeho
       fontFamily: 'inherit',
       whiteSpace: 'pre-wrap',
       wordBreak: 'break-word',
+      opacity: props.disabled ? 0.6 : 1,
     },
   });
 }
@@ -329,7 +406,11 @@ function loadUiState(): UiState {
 function MemAdminPage(): React.ReactElement {
   const [state, setState] = React.useState<StatusPayload | null>(null);
   const [error, setError] = React.useState<string | null>(null);
-  const [busy, setBusy] = React.useState(false);
+  /** In-flight requests, keyed by an incrementing id. Never a boolean: an
+   *  overlapping short load must not clear a long migration's busy state. */
+  const [pending, setPending] = React.useState<Record<number, PendingTask>>({});
+  const [ticker, setTicker] = React.useState(0);
+  const nextTaskId = React.useRef(0);
   const [editing, setEditing] = React.useState<EditingState | null>(null);
   const [confirmDel, setConfirmDel] = React.useState<EditingState | null>(null);
   const [initialUi] = React.useState(loadUiState);
@@ -356,13 +437,68 @@ function MemAdminPage(): React.ReactElement {
   const [modelStatus, setModelStatus] = React.useState<ModelStatusState | null>(null);
   /** Pending restore confirmation: the snapshot NAME the user clicked. */
   const [confirmRestore, setConfirmRestore] = React.useState<string | null>(null);
+  /** Live migration progress from the host; null until the first poll. */
+  const [migration, setMigration] = React.useState<MigrationStatus | null>(null);
+  /** Last result shown in the progress strip; cleared by the next action. */
+  const [lastOutcome, setLastOutcome] = React.useState<MigrationStatus | null>(null);
+
+  const pendingList = Object.values(pending);
+  const busy = pendingList.length > 0;
+  const activeTask = pendingList[0];
+  const activeMigration = !!(migration && migration.active);
+  const migrationStage = stageLabel(migration ? migration.stage : undefined);
+
+  /** Add one tracked in-flight request; returns its disposer. */
+  const track = (label: string): (() => void) => {
+    const id = ++nextTaskId.current;
+    const task: PendingTask = { label, startedAt: Date.now() };
+    setPending((prev) => Object.assign({}, prev, { [id]: task }));
+    return () => setPending((prev) => {
+      const next = Object.assign({}, prev);
+      delete next[id];
+      return next;
+    });
+  };
+
+  // A one-second ticker keeps the "已等待 N 秒" line honest during a long LLM
+  // call, and drives the lightweight migration-progress poll. No timer when
+  // nothing is in flight, so an idle page stays idle.
+  React.useEffect(() => {
+    if (!busy && !activeMigration) return;
+    const timer = window.setInterval(() => setTicker((n) => n + 1), 1000);
+    return () => window.clearInterval(timer);
+  }, [busy, activeMigration]);
+
+  /** Ask the host for the migration's real stage (it owns the LLM call). */
+  const pollMigration = React.useCallback(async () => {
+    try {
+      const res = await api('/projectMigrateStatus', undefined, 'GET');
+      const next: MigrationStatus = (res && res.migration) || { active: false };
+      // Status polls once a second; only write state when it actually changed,
+      // or a long migration would re-render the whole page every tick.
+      setMigration((prev) => JSON.stringify(prev) === JSON.stringify(next) ? prev : next);
+      const route = !!(res && res.llmRouteAvailable);
+      setState((prev) => prev && prev.llmRouteAvailable !== route
+        ? Object.assign({}, prev, { llmRouteAvailable: route }) : prev);
+      // Keep the finished stage visible until the next action: the notice can
+      // be dismissed, but the strip should still say why a run stopped.
+      if (!next.active && next.finishedAt && next.stage) setLastOutcome((prev) => JSON.stringify(prev) === JSON.stringify(next) ? prev : next);
+    } catch {
+      // An older host without this route is not a page failure: the in-flight
+      // mutation's own response still carries the outcome.
+    }
+  }, []);
+  React.useEffect(() => {
+    if (busy || activeMigration) pollMigration();
+  }, [busy, activeMigration, ticker, pollMigration]);
 
   const load = React.useCallback(async () => {
-    setBusy(true);
+    const done = track('读取状态');
     setError(null);
     try {
       const s = await api('/status', undefined, 'GET');
       setState(s as StatusPayload);
+      if (s && s.migration) setMigration(s.migration);
       if (s && s.config && Array.isArray(s.schema)) {
         const next: Record<string, unknown> = {};
         for (const f of s.schema as SchemaFieldClient[]) {
@@ -379,9 +515,17 @@ function MemAdminPage(): React.ReactElement {
         setCfgForm(next);
       }
     } catch (e) {
-      setError(String((e && (e as Error).message) || e));
+      const message = String((e && (e as Error).message) || e);
+      // Only the very first load has no cards to keep: show the old dedicated
+      // error page with a retry button. A later failed refresh keeps the cards
+      // visible and surfaces the reason in the notice strip.
+      setState((prev) => {
+        if (!prev) setError(message);
+        else setNotice('刷新失败: ' + message);
+        return prev;
+      });
     } finally {
-      setBusy(false);
+      done();
     }
   }, []);
   React.useEffect(() => { load(); }, [load]);
@@ -415,17 +559,34 @@ function MemAdminPage(): React.ReactElement {
     return () => { alive = false; clearTimeout(timer); };
   }, [modelName]);
 
+  /** A refused migration is a completed request, not "完成". */
+  const migrationOutcome = (res: any): string => {
+    if (res && res.migrated === true) {
+      const parts = ['迁移完成'];
+      if (res.written && res.written.length) parts.push(`新建 ${res.written.length} 个主题文件`);
+      if (res.backup) parts.push(`原文备份为 ${res.backup}`);
+      return parts.join('：');
+    }
+    if (res && res.migrated === false) return '未迁移：' + (res.reason || '计划未通过校验');
+    return (res && res.message) || '完成';
+  };
+
   const mutate = async (action: string, payload?: unknown) => {
-    setBusy(true);
+    if (busy) return; // single-flight guard: no double writes on a fast double click
+    const label = action === 'projectMigrate'
+      ? `迁移 ${String((payload as { project?: string } | undefined)?.project || 'AGENTS.md')}`
+      : actionLabel(action);
+    const done = track(label);
     setError(null);
     setNotice(null);
+    setLastOutcome(null);
     try {
       const res = await api('/' + action, payload || {});
       if (res && res.error) setNotice('操作失败: ' + res.error);
+      else if (action === 'projectMigrate') setNotice(migrationOutcome(res));
       // Mutations that report success:false carry a human-readable `reason`
       // (e.g. the migration planner's output failing a gate) — show it as the
       // outcome rather than a generic "完成".
-      else if (res && res.migrated === false && res.reason) setNotice('未迁移：' + res.reason);
       else if (res && res.ok === false && res.reason) setNotice('未完成：' + res.reason);
       else setNotice((res && res.message) || '完成');
       setEditing(null);
@@ -439,32 +600,50 @@ function MemAdminPage(): React.ReactElement {
       setStandingEdit(null);
       setNewStanding('');
       setConfirmRestore(null);
-      await load();
     } catch (e) {
-      setError(String((e && (e as Error).message) || e));
+      // A failed mutation is a normal outcome: keep the cards visible so the
+      // user can read the reason and retry. Only a failed initial LOAD blanks
+      // the page (see `load`).
+      setNotice(action === 'projectMigrate' ? '迁移失败：' : '操作失败：' + String((e && (e as Error).message) || e));
     } finally {
-      setBusy(false);
+      await load(); // refresh the cards; its own counter cannot clear this task
+      await pollMigration();
+      done();
     }
   };
 
   const saveConfig = async () => {
-    if (!cfgForm) return;
-    setBusy(true);
+    if (!cfgForm || busy) return;
+    const done = track('保存配置');
     setError(null);
     setNotice(null);
     try {
       const res = await api('/configSave', cfgForm);
       if (res && res.error) setNotice('保存失败: ' + res.error);
       else setNotice((res && res.message) || '配置已保存');
-      await load();
     } catch (e) {
-      // A rejected action (e.g. the migration planner's output failing a gate)
-      // is a normal outcome, not a page failure: surface it in the notice area
-      // so the cards stay visible and the user can read the reason and retry.
-      // Only a failed initial LOAD blanks the page (see `load`).
       setNotice('操作失败: ' + String((e && (e as Error).message) || e));
     } finally {
-      setBusy(false);
+      await load();
+      done();
+    }
+  };
+
+  /** Read-only fetch helpers also join the busy counter: opening an editor
+   *  while a migration runs would otherwise let two state refreshes race. */
+  const openProjectFile = async (proj: ProjectInfo, file: string) => {
+    if (busy) return;
+    const done = track('读取记忆文件');
+    setError(null);
+    try {
+      const res = await api('/projectRead', { project: proj.name, file });
+      setProjEdit({ project: proj.name, file, summary: String(res.summary || ''), content: String(res.content || '') });
+      setProjResidentEdit(null);
+      setProjCreate(null);
+    } catch (e) {
+      setNotice('读取失败：' + String((e && (e as Error).message) || e));
+    } finally {
+      done();
     }
   };
 
@@ -489,6 +668,24 @@ function MemAdminPage(): React.ReactElement {
   const projects = state.projects || [];
   const backups = state.backups || [];
   const whichName: Record<string, string> = { memory: 'MEMORY.md', user: 'USER.md', failure: 'failures.md' };
+  const routeAvailable = state.llmRouteAvailable === true;
+  // An active migration blocks every other action, even if this tab did not
+  // start it (the host is single-flight).
+  const locked = busy || activeMigration;
+  const elapsed = activeTask ? Date.now() - activeTask.startedAt : 0;
+
+  /** A button that obeys the page-wide lock without repeating the flag at
+   *  every call site. Locally disabled buttons stay disabled. */
+  const actionBtn = (
+    label: React.ReactNode,
+    onClick: () => void,
+    opts?: { disabled?: boolean; style?: React.CSSProperties; title?: string },
+  ): React.ReactElement => btn(label, onClick, Object.assign({}, opts, {
+    disabled: locked || !!(opts && opts.disabled),
+    // Keep an explicit local disable (e.g. already-migrated) visually dimmer
+    // than a mere busy lock, unless the caller set its own opacity.
+    style: Object.assign({}, opts && opts.style, locked && !(opts && opts.disabled) ? { opacity: 0.5 } : {}),
+  }));
 
   const card = (key: string, title: string, summary: string | null, children: React.ReactNode): React.ReactElement => {
     const isOpen = open[key];
@@ -516,93 +713,78 @@ function MemAdminPage(): React.ReactElement {
       const isConfirm = confirmDel && confirmDel.which === which && confirmDel.index === i;
       if (isEditing) {
         return React.createElement('div', { key: which + i, style: { padding: '8px 0', borderBottom: '1px solid var(--dsw-alias-border-l1)' } },
-          React.createElement(TextArea, { value: editing.text, onChange: (v) => setEditing({ which, index: i, text: v }), placeholder: '条目内容' }),
+          React.createElement(TextArea, { value: editing.text, onChange: (v) => setEditing({ which, index: i, text: v }), placeholder: '条目内容', disabled: locked }),
           React.createElement('div', { style: { display: 'flex', gap: 8, marginTop: 6 } },
-            btn('保存', () => mutate('update', { which, index: i, text: editing.text })),
-            btn('取消', () => setEditing(null)),
+            actionBtn('保存', () => mutate('update', { which, index: i, text: editing.text })),
+            actionBtn('取消', () => setEditing(null)),
           ),
         );
       }
       if (isConfirm) {
-        return React.createElement('div', { key: which + i, style: { padding: '8px 0', borderBottom: '1px solid var(--dsw-alias-border-l1)', fontSize: 13 } },
-          React.createElement('div', { style: { color: 'var(--dsw-alias-state-warn-primary)', marginBottom: 6 } }, '确认删除这条? ' + String(entry.text || '').slice(0, 60)),
+        return React.createElement('div', { key: which + i, style: { padding: '8px 0', borderBottom: '1px solid var(--dsw-alias-border-l1)' } },
+          React.createElement('div', { style: { color: 'var(--dsw-alias-state-warn-primary)', fontSize: 13, marginBottom: 6 } }, '确认删除这条记忆？'),
           React.createElement('div', { style: { display: 'flex', gap: 8 } },
-            btn('删除', () => mutate('delete', { which, index: i }), { style: { background: 'var(--dsw-alias-state-error-primary)', borderColor: 'transparent', color: '#fff' } }),
-            btn('取消', () => setConfirmDel(null)),
+            actionBtn('删除', () => mutate('delete', { which, index: i }), { style: { background: 'var(--dsw-alias-state-error-primary)', borderColor: 'transparent', color: '#fff' } }),
+            actionBtn('取消', () => setConfirmDel(null)),
           ),
         );
       }
-      return React.createElement('div', { key: which + i, style: { padding: '6px 0', borderBottom: '1px solid var(--dsw-alias-border-l1)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 } },
-        React.createElement('span', {
-          style: {
-            fontSize: 13,
-            lineHeight: 1.5,
-            flex: 1,
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            display: '-webkit-box',
-            WebkitLineClamp: 2,
-            WebkitBoxOrient: 'vertical',
-          },
-        }, String(entry.text || '')),
+      return React.createElement('div', { key: which + i, style: { padding: '8px 0', borderBottom: '1px solid var(--dsw-alias-border-l1)', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 } },
+        React.createElement('div', { style: { flex: 1, minWidth: 0, fontSize: 13, lineHeight: 1.5, whiteSpace: 'pre-wrap', wordBreak: 'break-word' } }, entry.text),
         React.createElement('div', { style: { display: 'flex', gap: 6, flexShrink: 0 } },
-          btn('编辑', () => setEditing({ which, index: i, text: String(entry.text || '') }), { style: { padding: '3px 8px', fontSize: 12 } }),
-          btn('删除', () => setConfirmDel({ which, index: i, text: String(entry.text || '') }), { style: { padding: '3px 8px', fontSize: 12 } }),
+          actionBtn('编辑', () => setEditing({ which, index: i, text: String(entry.text || '') }), { style: { padding: '3px 8px', fontSize: 12 } }),
+          actionBtn('删除', () => setConfirmDel({ which, index: i, text: String(entry.text || '') }), { style: { padding: '3px 8px', fontSize: 12 } }),
         ),
       );
     });
   };
 
   const standingRows = (): React.ReactNode => {
-    if (standing.length === 0) {
-      return React.createElement('div', { style: { fontSize: 13, color: 'var(--dsw-alias-label-secondary)', padding: '6px 0' } }, '（无常驻指令，可添加）');
-    }
+    if (standing.length === 0) return React.createElement('div', { style: { fontSize: 13, color: 'var(--dsw-alias-label-secondary)' } }, '（无常驻指令）');
     return standing.map((text, i) => {
       const isEditing = standingEdit && standingEdit.index === i;
       if (isEditing) {
-        return React.createElement('div', { key: 'st' + i, style: { padding: '8px 0', borderBottom: '1px solid var(--dsw-alias-border-l1)' } },
-          React.createElement(TextArea, { value: standingEdit.text, onChange: (v) => setStandingEdit({ index: i, text: v }), placeholder: '指令内容' }),
+        return React.createElement('div', { key: 's' + i, style: { padding: '8px 0', borderBottom: '1px solid var(--dsw-alias-border-l1)' } },
+          React.createElement(TextArea, { value: standingEdit.text, onChange: (v) => setStandingEdit({ index: i, text: v }), disabled: locked }),
           React.createElement('div', { style: { display: 'flex', gap: 8, marginTop: 6 } },
-            btn('保存', () => mutate('standingUpdate', { index: i, text: standingEdit.text })),
-            btn('取消', () => setStandingEdit(null)),
+            actionBtn('保存', () => mutate('standingUpdate', { index: i, text: standingEdit.text })),
+            actionBtn('取消', () => setStandingEdit(null)),
           ),
         );
       }
-      return React.createElement('div', { key: 'st' + i, style: { padding: '6px 0', borderBottom: '1px solid var(--dsw-alias-border-l1)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 } },
-        React.createElement('span', { style: { fontSize: 13, lineHeight: 1.5, flex: 1 } }, (i + 1) + '. ' + String(text || '')),
-        React.createElement('div', { style: { display: 'flex', gap: 6, flexShrink: 0 } },
-          btn('编辑', () => setStandingEdit({ index: i, text: String(text || '') }), { style: { padding: '3px 8px', fontSize: 12 } }),
-          btn('删除', () => mutate('standingRemove', { index: i }), { style: { padding: '3px 8px', fontSize: 12 } }),
+      return React.createElement('div', { key: 's' + i, style: { padding: '8px 0', borderBottom: '1px solid var(--dsw-alias-border-l1)', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 } },
+        React.createElement('span', { style: { flex: 1, fontSize: 13, whiteSpace: 'pre-wrap' } }, text),
+        React.createElement('div', { style: { display: 'flex', gap: 6 } },
+          actionBtn('编辑', () => setStandingEdit({ index: i, text }), { style: { padding: '3px 8px', fontSize: 12 } }),
+          actionBtn('删除', () => mutate('standingRemove', { index: i }), { style: { padding: '3px 8px', fontSize: 12 } }),
         ),
       );
     });
   };
 
   const filesBody = (): React.ReactElement => React.createElement('div', null,
-    ['memory', 'user', 'failure'].map((w) => {
-      const s = st[w];
-      return React.createElement('div', { key: w, style: { margin: '10px 0' } },
-        React.createElement('div', { style: { display: 'flex', justifyContent: 'space-between', fontSize: 13, fontWeight: 600, marginBottom: 2 } },
-          React.createElement('span', null, whichName[w]),
-          React.createElement('span', { style: { color: 'var(--dsw-alias-label-secondary)', fontWeight: 400 } },
-            (s && s.exists ? s.entries + ' 条 / ' + s.chars + ' 字符' : '不存在')),
+    (['memory', 'user', 'failure'] as const).map((which) => {
+      const info = st[which] || {};
+      return React.createElement('div', { key: which, style: { padding: '8px 0', borderBottom: '1px solid var(--dsw-alias-border-l1)' } },
+        React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 } },
+          React.createElement('span', { style: { fontWeight: 600, minWidth: 96 } }, whichName[which]),
+          React.createElement('span', { style: { color: 'var(--dsw-alias-label-secondary)' } },
+            info.exists ? `${info.entries} 条 · ${info.chars} 字符 · ${info.usagePct}%` : '文件不存在'),
         ),
-        s && s.exists ? meter(s.usagePct) : null,
-        React.createElement('div', { style: { marginTop: 6 } }, entryRows(w)),
+        meter(info.usagePct || 0),
+        entryRows(which),
       );
     }),
   );
 
-  /** Row for one `@memory/...` index entry. */
-  const projectEntryRow = (proj: ProjectInfo, entry: ProjectEntryInfo): React.ReactElement => {
-    const isConfirm = projConfirm && projConfirm.project === proj.name && projConfirm.file === entry.file;
-    if (isConfirm) {
+  const projectEntryRow = (proj: ProjectInfo, entry: ProjectEntryInfo): React.ReactNode => {
+    if (projConfirm && projConfirm.project === proj.name && projConfirm.file === entry.file) {
       return React.createElement('div', { key: proj.name + entry.file, style: { padding: '8px 0', borderBottom: '1px solid var(--dsw-alias-border-l1)', fontSize: 13 } },
         React.createElement('div', { style: { color: 'var(--dsw-alias-state-warn-primary)', marginBottom: 6 } },
           '确认删除 ' + entry.file + ' ？索引行会一并移除，文件移入 memory/.trash/（可恢复）'),
         React.createElement('div', { style: { display: 'flex', gap: 8 } },
-          btn('删除', () => mutate('projectDelete', { project: proj.name, file: entry.file }), { style: { background: 'var(--dsw-alias-state-error-primary)', borderColor: 'transparent', color: '#fff' } }),
-          btn('取消', () => setProjConfirm(null)),
+          actionBtn('删除', () => mutate('projectDelete', { project: proj.name, file: entry.file }), { style: { background: 'var(--dsw-alias-state-error-primary)', borderColor: 'transparent', color: '#fff' } }),
+          actionBtn('取消', () => setProjConfirm(null)),
         ),
       );
     }
@@ -614,26 +796,10 @@ function MemAdminPage(): React.ReactElement {
           entry.exists ? entry.chars + ' 字符' : '文件缺失（索引仍在）'),
       ),
       React.createElement('div', { style: { display: 'flex', gap: 6, flexShrink: 0 } },
-        btn('编辑', () => openProjectFile(proj, entry.file), { style: { padding: '3px 8px', fontSize: 12 } }),
-        btn('删除', () => setProjConfirm({ project: proj.name, file: entry.file }), { style: { padding: '3px 8px', fontSize: 12 } }),
+        actionBtn('编辑', () => openProjectFile(proj, entry.file), { style: { padding: '3px 8px', fontSize: 12 } }),
+        actionBtn('删除', () => setProjConfirm({ project: proj.name, file: entry.file }), { style: { padding: '3px 8px', fontSize: 12 } }),
       ),
     );
-  };
-
-  /** Load one topic file into the editor. */
-  const openProjectFile = async (proj: ProjectInfo, file: string) => {
-    setBusy(true);
-    setError(null);
-    try {
-      const res = await api('/projectRead', { project: proj.name, file });
-      setProjEdit({ project: proj.name, file, summary: String(res.summary || ''), content: String(res.content || '') });
-      setProjResidentEdit(null);
-      setProjCreate(null);
-    } catch (e) {
-      setError(String((e && (e as Error).message) || e));
-    } finally {
-      setBusy(false);
-    }
   };
 
   /**
@@ -651,13 +817,13 @@ function MemAdminPage(): React.ReactElement {
       setGuide({ open: true, text: String(res.guide || ''), loading: false });
     } catch (e) {
       setGuide({ open: true, text: null, loading: false });
-      setError(String((e && (e as Error).message) || e));
+      setNotice('读取写法指南失败：' + String((e && (e as Error).message) || e));
     }
   };
 
   const projectGuidePanel = (): React.ReactNode => React.createElement('div', { style: { margin: '6px 0 10px' } },
     React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
-      btn(guide.open ? '收起写法指南' : '怎么看/怎么写项目记忆（AGENTS.md 两区划分）', toggleGuide, { style: { padding: '3px 10px', fontSize: 12 } }),
+      actionBtn(guide.open ? '收起写法指南' : '怎么看/怎么写项目记忆（AGENTS.md 两区划分）', toggleGuide, { style: { padding: '3px 10px', fontSize: 12 } }),
       guide.text
         ? btn('复制', () => {
             try { void window.navigator.clipboard.writeText(guide.text || ''); } catch { /* clipboard blocked */ }
@@ -686,7 +852,15 @@ function MemAdminPage(): React.ReactElement {
        * there is nothing to migrate; with no AGENTS.md there is nothing to read.
        */
       const migratedAlready = proj.entries.length > 0;
-      const canMigrate = proj.exists && !migratedAlready;
+      const noLlmRoute = !routeAvailable && state.llmRouteAvailable !== undefined;
+      const canMigrate = proj.exists && !migratedAlready && (routeAvailable || state.llmRouteAvailable === undefined);
+      const migrationReason = migratedAlready
+        ? '该项目的 AGENTS.md 已经是「常驻区 + 索引」形态，无需迁移'
+        : !proj.exists
+          ? '该项目还没有 AGENTS.md，没有可迁移的内容'
+          : noLlmRoute
+            ? '还没有可用的模型路由：先在当前 dsh web 里发一次会话请求，让插件记录所用的 provider/model，再来迁移'
+            : '把纯散文的 AGENTS.md 拆成「常驻区 + @memory/ 索引」';
       const residentEditing = projResidentEdit && projResidentEdit.project === proj.name;
       const creating = projCreate && projCreate.project === proj.name;
       const editingHere = projEdit && projEdit.project === proj.name;
@@ -720,10 +894,10 @@ function MemAdminPage(): React.ReactElement {
             residentIsOpen
               ? (residentEditing
                   ? React.createElement('div', { style: { marginTop: 4 } },
-                      React.createElement(TextArea, { value: projResidentEdit.content, onChange: (v) => setProjResidentEdit({ project: proj.name, content: v }), placeholder: '每行一条常驻规则；细节请写进 memory/ 主题文件' }),
+                      React.createElement(TextArea, { value: projResidentEdit.content, onChange: (v) => setProjResidentEdit({ project: proj.name, content: v }), placeholder: '每行一条常驻规则；细节请写进 memory/ 主题文件', disabled: locked }),
                       React.createElement('div', { style: { display: 'flex', gap: 8, marginTop: 6 } },
-                        btn('保存', () => mutate('projectResident', { project: proj.name, content: projResidentEdit.content })),
-                        btn('取消', () => setProjResidentEdit(null)),
+                        actionBtn('保存', () => mutate('projectResident', { project: proj.name, content: projResidentEdit.content })),
+                        actionBtn('取消', () => setProjResidentEdit(null)),
                       ),
                     )
                   : React.createElement('div', { style: { marginTop: 4 } },
@@ -731,7 +905,7 @@ function MemAdminPage(): React.ReactElement {
                         ? React.createElement('div', { style: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)', padding: '4px 0' } }, '（无，索引即全部内容）')
                         : React.createElement('div', { style: { fontSize: 12, lineHeight: 1.6, whiteSpace: 'pre-wrap', background: 'var(--dsw-alias-bg-layer-1)', borderRadius: 6, padding: '6px 8px', maxHeight: 180, overflow: 'auto' } }, proj.resident.join('\n')),
                       React.createElement('div', { style: { marginTop: 4 } },
-                        btn('编辑常驻区', () => { setProjResidentEdit({ project: proj.name, content: proj.resident.join('\n') }); setProjEdit(null); setProjCreate(null); }, { style: { padding: '3px 8px', fontSize: 12 } }),
+                        actionBtn('编辑常驻区', () => { setProjResidentEdit({ project: proj.name, content: proj.resident.join('\n') }); setProjEdit(null); setProjCreate(null); }, { style: { padding: '3px 8px', fontSize: 12 } }),
                       ),
                     ))
               : null,
@@ -754,12 +928,13 @@ function MemAdminPage(): React.ReactElement {
                   value: projEdit.summary,
                   onChange: (e: React.ChangeEvent<HTMLInputElement>) => setProjEdit({ ...projEdit, summary: e.target.value }),
                   placeholder: '一句话描述（写进 AGENTS.md 的 @ 行）',
+                  disabled: locked,
                   style: { width: '100%', boxSizing: 'border-box', fontSize: 12, padding: '4px 6px', marginBottom: 6, border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 4, background: 'var(--dsw-alias-bg-layer-1)', color: 'var(--dsw-alias-label-primary)' },
                 }),
-                React.createElement(TextArea, { value: projEdit.content, onChange: (v) => setProjEdit({ ...projEdit, content: v }), placeholder: '记忆文件内容（Markdown）' }),
+                React.createElement(TextArea, { value: projEdit.content, onChange: (v) => setProjEdit({ ...projEdit, content: v }), placeholder: '记忆文件内容（Markdown）', disabled: locked }),
                 React.createElement('div', { style: { display: 'flex', gap: 8, marginTop: 6 } },
-                  btn('保存', () => mutate('projectWrite', { project: proj.name, file: projEdit.file, summary: projEdit.summary, content: projEdit.content })),
-                  btn('取消', () => setProjEdit(null)),
+                  actionBtn('保存', () => mutate('projectWrite', { project: proj.name, file: projEdit.file, summary: projEdit.summary, content: projEdit.content })),
+                  actionBtn('取消', () => setProjEdit(null)),
                 ),
               )
             : null,
@@ -770,8 +945,8 @@ function MemAdminPage(): React.ReactElement {
                 proj.orphans.map((file) => React.createElement('div', { key: proj.name + file, style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 12, padding: '3px 0', gap: 8 } },
                   React.createElement('span', { style: { flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' } }, file),
                   React.createElement('div', { style: { display: 'flex', gap: 6, flexShrink: 0 } },
-                    btn('查看', () => openProjectFile(proj, file), { style: { padding: '2px 8px', fontSize: 11 } }),
-                    btn('删除', () => setProjConfirm({ project: proj.name, file }), { style: { padding: '2px 8px', fontSize: 11 } }),
+                    actionBtn('查看', () => openProjectFile(proj, file), { style: { padding: '2px 8px', fontSize: 11 } }),
+                    actionBtn('删除', () => setProjConfirm({ project: proj.name, file }), { style: { padding: '2px 8px', fontSize: 11 } }),
                   ),
                 )),
               )
@@ -783,46 +958,46 @@ function MemAdminPage(): React.ReactElement {
                   value: projCreate.file,
                   onChange: (e: React.ChangeEvent<HTMLInputElement>) => setProjCreate({ ...projCreate, file: e.target.value }),
                   placeholder: 'memory/新主题.md',
+                  disabled: locked,
                   style: { width: '100%', boxSizing: 'border-box', fontSize: 12, padding: '4px 6px', marginBottom: 6, border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 4, background: 'var(--dsw-alias-bg-layer-1)', color: 'var(--dsw-alias-label-primary)' },
                 }),
                 React.createElement('input', {
                   value: projCreate.summary,
                   onChange: (e: React.ChangeEvent<HTMLInputElement>) => setProjCreate({ ...projCreate, summary: e.target.value }),
                   placeholder: '一句话描述',
+                  disabled: locked,
                   style: { width: '100%', boxSizing: 'border-box', fontSize: 12, padding: '4px 6px', marginBottom: 6, border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 4, background: 'var(--dsw-alias-bg-layer-1)', color: 'var(--dsw-alias-label-primary)' },
                 }),
-                React.createElement(TextArea, { value: projCreate.content, onChange: (v) => setProjCreate({ ...projCreate, content: v }), placeholder: '文件内容（Markdown）' }),
+                React.createElement(TextArea, { value: projCreate.content, onChange: (v) => setProjCreate({ ...projCreate, content: v }), placeholder: '文件内容（Markdown）', disabled: locked }),
                 React.createElement('div', { style: { display: 'flex', gap: 8, marginTop: 6 } },
-                  btn('创建', () => mutate('projectCreate', { project: proj.name, file: projCreate.file, summary: projCreate.summary, content: projCreate.content })),
-                  btn('取消', () => setProjCreate(null)),
+                  actionBtn('创建', () => mutate('projectCreate', { project: proj.name, file: projCreate.file, summary: projCreate.summary, content: projCreate.content })),
+                  actionBtn('取消', () => setProjCreate(null)),
                 ),
               )
             : React.createElement('div', { style: { marginTop: 10 } },
                 React.createElement('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
-                  btn('+ 新建记忆文件', () => { setProjCreate({ project: proj.name, file: 'memory/', summary: '', content: '' }); setProjEdit(null); setProjResidentEdit(null); }, { style: { padding: '3px 10px', fontSize: 12 } }),
+                  actionBtn('+ 新建记忆文件', () => { setProjCreate({ project: proj.name, file: 'memory/', summary: '', content: '' }); setProjEdit(null); setProjResidentEdit(null); }, { style: { padding: '3px 10px', fontSize: 12 } }),
                   // Migration is a one-shot transformation of a prose document;
                   // once index entries exist it is meaningless and unsafe.
-                  btn('迁移旧 AGENTS.md', () => mutate('projectMigrate', { project: proj.name, apply: true }), {
-                    disabled: !canMigrate,
-                    style: {
-                      padding: '3px 10px',
-                      fontSize: 12,
-                      opacity: canMigrate ? 1 : 0.4,
-                      cursor: canMigrate ? 'pointer' : 'not-allowed',
-                    },
-                    title: canMigrate
-                      ? '把纯散文的 AGENTS.md 拆成「常驻区 + @memory/ 索引」'
-                      : migratedAlready
-                        ? '该项目的 AGENTS.md 已经是「常驻区 + 索引」形态，无需迁移'
-                        : '该项目还没有 AGENTS.md，没有可迁移的内容',
-                  }),
+                  actionBtn(activeMigration && migration && migration.project === proj.name ? '迁移处理中…' : '迁移旧 AGENTS.md',
+                    () => mutate('projectMigrate', { project: proj.name, apply: true }), {
+                      disabled: !canMigrate,
+                      style: {
+                        padding: '3px 10px',
+                        fontSize: 12,
+                        opacity: canMigrate ? 1 : 0.4,
+                      },
+                      title: migrationReason,
+                    }),
                 ),
-                React.createElement('div', { style: { fontSize: 11, color: 'var(--dsw-alias-label-secondary)', marginTop: 4, lineHeight: 1.5 } },
+                React.createElement('div', { style: { fontSize: 11, color: noLlmRoute ? 'var(--dsw-alias-state-warn-primary)' : 'var(--dsw-alias-label-secondary)', marginTop: 4, lineHeight: 1.5 } },
                   migratedAlready
                     ? '已迁移，按钮已停用。继续精简常驻区请用上方「编辑常驻区」。'
-                    : canMigrate
-                      ? '把散文 AGENTS.md 拆成「常驻区 + 索引」，原文另存 .bak。'
-                      : '该项目还没有 AGENTS.md。'),
+                    : noLlmRoute
+                      ? '迁移需要一个模型路由：先在当前 dsh web 里发一次会话请求，按钮会自动启用。'
+                      : canMigrate
+                        ? '把散文 AGENTS.md 拆成「常驻区 + 索引」，原文另存 .bak。调用模型规划拆分，最长约 120 秒。'
+                        : '该项目还没有 AGENTS.md。'),
               ),
         ) : null,
       ));
@@ -833,16 +1008,17 @@ function MemAdminPage(): React.ReactElement {
         value,
         onChange: (e: React.ChangeEvent<HTMLInputElement>) => onChange(e.target.value),
         placeholder,
+        disabled: locked,
         style: { flex: 1, fontSize: 12, padding: '4px 6px', border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 4, background: 'var(--dsw-alias-bg-layer-1)', color: 'var(--dsw-alias-label-primary)' },
       });
     nodes.push(React.createElement('div', { key: 'register', style: { marginTop: 12, paddingTop: 10, borderTop: '1px solid var(--dsw-alias-border-l1)' } },
       React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
         pathInput(newProjectPath, setNewProjectPath, '仓库路径（子目录会自动归到仓库根）'),
-        btn('登记项目', () => mutate('projectRegister', { root: newProjectPath }), { style: { padding: '3px 10px', fontSize: 12 } }),
+        actionBtn('登记项目', () => mutate('projectRegister', { root: newProjectPath }), { style: { padding: '3px 10px', fontSize: 12 } }),
       ),
       React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 8 } },
         pathInput(scanPath, setScanPath, '父目录（扫描其下所有 git 仓库，最多 4 层）'),
-        btn('扫描目录', () => mutate('projectScan', { root: scanPath }), { style: { padding: '3px 10px', fontSize: 12 } }),
+        actionBtn('扫描目录', () => mutate('projectScan', { root: scanPath }), { style: { padding: '3px 10px', fontSize: 12 } }),
       ),
       React.createElement('div', { style: { fontSize: 11, color: 'var(--dsw-alias-label-secondary)', marginTop: 6, lineHeight: 1.5 } },
         '只登记路径，不改动仓库文件。会话里写过记忆的已自动登记。'),
@@ -878,7 +1054,7 @@ function MemAdminPage(): React.ReactElement {
       React.createElement('span', { style: { color: 'var(--dsw-alias-label-secondary)' } }, idx.vector && idx.vector.exists ? fmtBytes(idx.vector.size) : '未启用')),
     React.createElement('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 0 2px' } },
       React.createElement('div', { style: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)' } }, '索引可随时重建，不影响记忆本体；向量搜索相关配置见下方「插件配置」卡'),
-      btn('重建向量索引', () => mutate('rebuildVector', {}), { style: { background: 'var(--dsw-alias-bg-layer-2)' } }),
+      actionBtn('重建向量索引', () => mutate('rebuildVector', {}), { style: { background: 'var(--dsw-alias-bg-layer-2)' } }),
     ),
   );
 
@@ -902,10 +1078,11 @@ function MemAdminPage(): React.ReactElement {
         ),
         confirming
           ? React.createElement(React.Fragment, null,
-              btn('确认覆盖', () => mutate('restoreLatest', { snapshot: b.name }), { style: { background: 'var(--dsw-alias-state-error-primary)', borderColor: 'transparent', color: '#fff', padding: '3px 10px', fontSize: 12 } }),
-              btn('取消', () => setConfirmRestore(null), { style: { padding: '3px 10px', fontSize: 12 } }),
+              actionBtn('确认覆盖', () => mutate('restoreLatest', { snapshot: b.name }), { style: { background: 'var(--dsw-alias-state-error-primary)', borderColor: 'transparent', color: '#fff', padding: '3px 10px', fontSize: 12 } }),
+              actionBtn('取消', () => setConfirmRestore(null), { style: { padding: '3px 10px', fontSize: 12 } }),
             )
-          : btn('恢复', () => setConfirmRestore(b.name), {
+          : actionBtn('恢复', () => setConfirmRestore(b.name), {
+              disabled: !b.restorable,
               style: { background: 'var(--dsw-alias-bg-layer-2)', padding: '3px 10px', fontSize: 12, whiteSpace: 'nowrap' },
               title: '用该快照覆盖当前记忆',
             }),
@@ -922,7 +1099,7 @@ function MemAdminPage(): React.ReactElement {
           '与 Pi 完全隔离；latest 每次覆盖写一份，历史快照保留最近 ' + (state.backupKeep ?? 14)
           + ' 份（「插件配置 → 备份」可改，0=只留 latest）'),
         React.createElement('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', padding: '10px 0 0' } },
-          btn('立即备份', () => mutate('backup', {}), { style: { background: 'var(--dsw-alias-bg-layer-2)' } }),
+          actionBtn('立即备份', () => mutate('backup', {}), { style: { background: 'var(--dsw-alias-bg-layer-2)' } }),
         ),
         React.createElement('div', { style: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)', lineHeight: 1.6, marginTop: 8 } },
           '「恢复」会用该快照覆盖当前记忆（全局 4 文件 + 已登记项目），需二次确认。Pi 记忆丢失时默认自动切回本地并从 latest 恢复。'),
@@ -974,14 +1151,15 @@ function MemAdminPage(): React.ReactElement {
               type: 'checkbox',
               checked: !!val,
               onChange: (e: React.ChangeEvent<HTMLInputElement>) => setVal(e.target.checked),
+              disabled: locked,
             });
           } else if (f.type === 'number') {
-            control = numberInput(val, setVal, '');
+            control = numberInput(val, setVal, '', locked);
           } else if (f.type === 'select') {
             control = React.createElement('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 6 } },
               (f.options || []).map((opt) => {
                 const active = String(val) === opt;
-                return btn(opt, () => setVal(opt), {
+                return actionBtn(opt, () => setVal(opt), {
                   style: {
                     padding: '3px 10px',
                     fontSize: 12,
@@ -1000,13 +1178,13 @@ function MemAdminPage(): React.ReactElement {
           } else {
             control = key === 'embeddingModel'
               ? React.createElement('div', null,
-                  input(val, setVal, '模型名'),
+                  input(val, setVal, '模型名', locked),
                   modelStatusLine(),
                   React.createElement('div', { style: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)', margin: '8px 0 4px' } }, '已下载模型（点击选用）'),
                   React.createElement('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 6 } },
                     (m.models || []).map((mo) => {
                       const active = String(val) === mo.name;
-                      return btn(mo.name, () => setVal(mo.name), {
+                      return actionBtn(mo.name, () => setVal(mo.name), {
                         style: {
                           padding: '3px 10px',
                           fontSize: 12,
@@ -1023,7 +1201,7 @@ function MemAdminPage(): React.ReactElement {
                       : null,
                   ),
                 )
-              : input(val, setVal, '');
+              : input(val, setVal, '', locked);
           }
           return React.createElement('div', { key, style: { padding: '8px 0', borderBottom: '1px solid var(--dsw-alias-border-l1)' } },
             React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, fontWeight: 600 } },
@@ -1045,7 +1223,7 @@ function MemAdminPage(): React.ReactElement {
       React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 12 } },
         // Default button look (no brand override): --dsw-alias-brand-primary is
         // undefined in the web shell, which rendered this CTA as a white blank.
-        btn('保存全部配置', saveConfig, { style: { fontWeight: 600 } }),
+        actionBtn('保存全部配置', saveConfig, { style: { fontWeight: 600 } }),
         React.createElement('span', { style: { fontSize: 12, color: 'var(--dsw-alias-state-warn-primary)' } }, '保存后需重启 web 生效'),
       ),
     );
@@ -1067,16 +1245,68 @@ function MemAdminPage(): React.ReactElement {
     : '无';
   const configSummary = (state.schema || []).length + ' 项';
 
+  /** The progress strip is the answer to "处理中是真的在处理吗？". It names
+   *  the action, the host's real stage, and a live elapsed timer. */
+  const progressLine = (): React.ReactNode => {
+    if (!locked && !lastOutcome) return null;
+    const label = activeTask ? activeTask.label : '迁移旧 AGENTS.md';
+    const shown = locked ? migration : lastOutcome;
+    const stage = stageLabel(shown ? shown.stage : undefined);
+    const parts: string[] = [];
+    if (locked) {
+      parts.push(label + ' 处理中');
+      if (stage && activeMigration) parts.push(stage);
+      if (shown && shown.detail) parts.push(shown.detail);
+      if (activeTask) parts.push(fmtElapsed(elapsed));
+      if (activeMigration && migration && migration.startedAt && !activeTask) parts.push(fmtElapsed(Date.now() - migration.startedAt));
+    } else if (lastOutcome) {
+      parts.push('上次迁移：' + (stage || '已结束'));
+      if (lastOutcome.reason) parts.push(lastOutcome.reason);
+      if (lastOutcome.detail) parts.push(lastOutcome.detail);
+      if (lastOutcome.elapsedMs) parts.push('耗时 ' + fmtElapsed(lastOutcome.elapsedMs));
+    }
+    return React.createElement('div', {
+      role: 'status',
+      style: {
+        display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap',
+        fontSize: 12, lineHeight: 1.5,
+        color: 'var(--dsw-alias-label-secondary)',
+        background: 'var(--dsw-alias-bg-layer-2)',
+        border: '1px solid var(--dsw-alias-border-l1)',
+        borderRadius: 6, padding: '6px 10px', marginBottom: 8,
+        wordBreak: 'break-word',
+      },
+    },
+      React.createElement('span', {
+        style: {
+          width: 8, height: 8, borderRadius: '50%', flexShrink: 0,
+          background: locked ? 'var(--dsw-alias-state-success-primary)' : 'var(--dsw-alias-border-l2)',
+          display: 'inline-block',
+        },
+      }),
+      React.createElement('span', { style: { flex: 1, minWidth: 0 } }, parts.join(' · ')),
+      locked
+        ? React.createElement('span', { style: { fontSize: 11, whiteSpace: 'nowrap' } }, '处理期间按钮与输入框已锁定')
+        : btn('知道了', () => setLastOutcome(null), { style: { padding: '2px 8px', fontSize: 11 } }),
+    );
+  };
+
   return React.createElement('div', { style: { maxWidth: 720 } },
     React.createElement('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 } },
       React.createElement('div', { style: { fontWeight: 600, fontSize: 15 } }, '记忆管理'),
       React.createElement('div', { style: { display: 'flex', gap: 8 } },
-        btn(busy ? '处理中' : '刷新', load)),
+        btn(locked ? '处理中' : '刷新', load, {
+          disabled: locked,
+          title: locked ? '请求处理中，按钮已禁用' : '重新读取全部记忆状态',
+          style: { opacity: locked ? 0.6 : 1 },
+        }),
+      ),
     ),
+    progressLine(),
     notice ? React.createElement('div', {
       style: {
         fontSize: 13,
-        color: /失败|失败|错误/.test(notice) ? 'var(--dsw-alias-state-error-primary)' : 'var(--dsw-alias-state-success-primary)',
+        color: /失败|错误|未迁移|未完成/.test(notice) ? 'var(--dsw-alias-state-error-primary)' : 'var(--dsw-alias-state-success-primary)',
         margin: '0 0 8px',
         // Rejection reasons can be long (they may quote a plan); keep the page
         // readable instead of letting one message scroll the cards off screen.
@@ -1092,8 +1322,8 @@ function MemAdminPage(): React.ReactElement {
     card('standing', '常驻指令', standingSummary,
       React.createElement('div', null,
         React.createElement('div', { style: { display: 'flex', gap: 8, margin: '10px 0' } },
-          React.createElement('div', { style: { flex: 1 } }, input(newStanding, setNewStanding, '新增常驻指令...')),
-          btn('添加', () => mutate('standingAdd', { text: newStanding })),
+          React.createElement('div', { style: { flex: 1 } }, input(newStanding, (v) => setNewStanding(v), '新增常驻指令...', locked)),
+          actionBtn('添加', () => mutate('standingAdd', { text: newStanding })),
         ),
         standingRows(),
       ),
