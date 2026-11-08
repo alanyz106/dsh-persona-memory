@@ -324,6 +324,35 @@ check('the archive hint explains what the zip contains',
   const importedTree = renderOnce(Page, pickHooks, seed).tree;
   check('import notice shows the host message',
     /导入完成：写入 2 个文件/.test(visibleText(importedTree)), visibleText(importedTree).slice(0, 260));
+
+  // Regression: a stale host (page newer than the running process) answers 404.
+  // The notice must say "重启 dsh web", not a bare "HTTP 404" — that bare
+  // message is exactly what made a working export button look broken.
+  globalThis.fetch = async () => ({ ok: false, status: 404, json: async () => ({}) });
+  pickers[0].props.onPick(file);
+  for (let i = 0; i < 8; i++) await new Promise((r) => setTimeout(r, 0));
+  const staleTree = renderOnce(Page, pickHooks, seed).tree;
+  check('import 404 explains the stale host instead of showing a bare HTTP code',
+    /重启 web 后重试/.test(visibleText(staleTree)) && !/HTTP 404(?!.*重启)/.test(visibleText(staleTree)),
+    visibleText(staleTree).slice(0, 300));
+}
+
+// Export on a stale host gets the same explanation.
+{
+  const staleHooks = [];
+  const staleCalls = makeFetch({ default: () => WITH_PROJECT });
+  const first = renderOnce(Page, staleHooks, seed);
+  await runEffects(first.effects);
+  const staleTree = renderOnce(Page, staleHooks, seed).tree;
+  globalThis.fetch = async () => ({ ok: false, status: 404, json: async () => ({}) });
+  findButton(staleTree, '导出记忆包').props.onClick();
+  const running = renderOnce(Page, staleHooks, seed);
+  await runEffects(running.effects);
+  const afterTree = renderOnce(Page, staleHooks, seed).tree;
+  check('export 404 explains the stale host instead of showing a bare HTTP code',
+    /导出失败/.test(visibleText(afterTree)) && /重启 web 后重试/.test(visibleText(afterTree)),
+    visibleText(afterTree).slice(0, 300));
+  void staleCalls;
 }
 
 // Simulate a long migration: POST /projectMigrate never resolves, while the

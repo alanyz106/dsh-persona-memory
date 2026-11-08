@@ -210,6 +210,24 @@ function saveBlob(blob: Blob, filename: string): boolean {
   }
 }
 
+/**
+ * Turn a failed binary/raw upload response into the same actionable message
+ * `api()` gives, from the JSON error body when there is one.
+ *
+ * Why this exists: export/import bypass `api()` (one response is a zip, the
+ * other a raw byte body), so they used to surface a bare "HTTP 404". A 404 on
+ * an admin route almost always means the running host is older than the
+ * installed package — the exact confusion that made a working button look
+ * broken — so both paths must explain it identically.
+ */
+function rawRequestError(status: number, body: any): Error {
+  const detail = body && (body.error || body.message) ? String(body.error || body.message) : '';
+  if (status === 404) {
+    return new Error((detail ? detail + ' —— ' : '') + '该接口在运行中的宿主里不存在，通常是重装插件后没重启 dsh web（页面比宿主新）。重启 web 后重试。');
+  }
+  return new Error(detail || 'HTTP ' + status);
+}
+
 /** `demo-memory-20261108-231502.zip` — mirrors the host's naming so both agree. */
 function archiveFileName(project: string): string {
   const d = new Date();
@@ -739,12 +757,9 @@ function MemAdminPage(): React.ReactElement {
         body: JSON.stringify({ project: proj.name }),
       });
       if (!res.ok) {
-        let message = 'HTTP ' + res.status;
-        try {
-          const body = await res.json();
-          if (body && body.error) message = String(body.error);
-        } catch { /* non-JSON error body */ }
-        throw new Error(message);
+        let body: any = null;
+        try { body = await res.json(); } catch { /* non-JSON error body */ }
+        throw rawRequestError(res.status, body);
       }
       const blob = await res.blob();
       const headerName = res.headers && typeof res.headers.get === 'function' ? res.headers.get('x-archive-filename') : '';
@@ -776,7 +791,7 @@ function MemAdminPage(): React.ReactElement {
       });
       let body: any = null;
       try { body = await res.json(); } catch { /* empty body */ }
-      if (!res.ok) throw new Error((body && (body.error || body.message)) || 'HTTP ' + res.status);
+      if (!res.ok) throw rawRequestError(res.status, body);
       const warnings = body && Array.isArray(body.warnings) && body.warnings.length
         ? '（注意：' + body.warnings.join('；') + '）'
         : '';
