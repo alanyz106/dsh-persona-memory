@@ -61,7 +61,7 @@
 | 字节格式稳定性 | 无尾随换行、charCount 含分隔符、USER 上限 5000、超限拒绝写入、注入 `<memory-context>` 围栏 |
 | 路径安全闸门 | 项目记忆的每个路径（工具参数、管理页 body、迁移产物）都过 `safeMemoryRel`：必须 `memory/**.md`、无 `..`、无绝对路径、无 dotfile、resolve 后仍在 `memory/` 内（含符号链接逃逸检查） |
 | 优雅降级 | FTS5 不可用回退子串搜索；SQLite 动态 import，插件绝不硬依赖 |
-| 376+ 项冒烟测试 + UI 契约测试 | 验证存储格式、解析、读写、扫描、合并、项目根探测、索引解析、路径安全、迁移校验与进度上报、备份恢复、纠正、FTS、向量索引、溢出拒绝、并发全链路；`test/client-ui.mjs` 直接渲染预构建 bundle 断言「处理中」按钮禁用、全页锁定与进度条，`test/admin-fence.mjs` 核对 loopback 围栏 |
+| 390+ 项冒烟测试 + UI 契约测试 | 验证存储格式、解析、读写、扫描、合并、项目根探测、索引解析、路径安全、迁移提示词/宽主题 few-shot/校验与进度上报、备份恢复、纠正、FTS、向量索引、溢出拒绝、并发全链路；`test/client-ui.mjs` 直接渲染预构建 bundle 断言「处理中」按钮禁用、全页锁定与进度条，`test/admin-fence.mjs` 核对 loopback 围栏 |
 ---
 
 ## 借鉴来源（明确声明）
@@ -309,11 +309,11 @@ file: 安装是真实副本——改代码后须重新构建、`dsh plugin --pro
 
 ### 迁移已有 AGENTS.md
 
-首次写入遇到散文式 `AGENTS.md` 时（`projectAutoMigrate: true`），用**会话自身的模型路由**规划拆分：
+首次写入遇到散文式 `AGENTS.md` 时（`projectAutoMigrate: true`），用**会话自身的模型路由**规划拆分。模型不是只收到一句「拆成常驻区 + 主题文件」；`system` 里会拼上 `lib/project-guide.ts` 的**完整写法指南**，再加一段「宽主题」规则和一个基于真实仓库形态的 **few-shot**：18 个原文小节归并为 6 个宽主题文件（如 `status-and-roadmap` / `environment` / `dataset-and-annotation` / `models-and-code` / `protocol-and-online` / `pitfalls`），每个文件保留多个原文标题与段落，而不是一节一个索引。user 消息只放待迁移的原文，避免模型把指南/示例误当成要迁移的文档。
 
 1. 常驻区只留操作性硬约束（构建/测试命令、禁改清单、部署约束、必守规范），原文措辞不动；
-2. 其余按主题拆进 `memory/<topic>.md`；
-3. **校验闸门**：计划必须可解析、每个文件路径过 `safeMemoryRel`、内容过 scanner、不超预算，且**原文每个标题都必须能在常驻区或某个主题文件里找到**——任一不满足就整份放弃、文件不动；
+2. 其余按**少数宽主题**归并进 `memory/<topic>.md`（目标 3–6 个，最多 8 个），索引描述回答「什么时候该读这个文件」；
+3. **校验闸门**：计划必须可解析、文件数不过粒度上限、路径过 `safeMemoryRel`、每个文件有 summary 且不能用 `all.md` / `notes.md` / `misc.md`、内容过 scanner、常驻区/索引区不超预算，且**原文每个标题都必须能在常驻区或某个主题文件里找到**——任一不满足就整份放弃、备份和主题文件都不会写；
 4. 通过后原文另存 `AGENTS.md.bak-<时间戳>`，再写主题文件与新的 `AGENTS.md`。
 
 迁移优先复用**当前 web 进程最近一次会话请求**的 `provider/model` 路由；用户还没在 web 里对话过时，直接继承宿主的 `agentDefaultModel`（profile `cordis.patch.yml` 里 `agent-default-model` 的默认 provider/model），**不需要先发一次会话请求**。只有连默认模型都没配置时，管理页才停用按钮并提示配置 `agent-default-model`。一次规划调用的默认超时为 10 分钟（`projectMigrateTimeoutMs`，可在插件配置里调大），适配长 `AGENTS.md` 和慢速推理模型。管理页点「迁移旧 AGENTS.md」后，宿主按真实阶段（检查 AGENTS.md 形态 → 调用模型规划拆分 → 校验计划 → 写入主题文件与索引）上报进度，页面显示操作名、阶段说明、所用模型、超时与已等待时间，同时**刷新按钮和所有会改文件的按钮/输入框都禁用**；同一时刻只允许一个迁移在跑（另一个标签页或双击会被明确拒绝）。每个阶段也会写进 `<dshHome>/logs/persona-memory.log`（`admin: migrate <root> stage=...`），便于事后核对「处理中」是否真的在推进。失败/拒绝时页面保留卡片并给出可读原因，完成后显示新建主题文件数与 `.bak` 文件名。

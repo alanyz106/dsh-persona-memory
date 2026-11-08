@@ -416,7 +416,7 @@ const dumpPlan = parsePlan(JSON.stringify({
   files: [{ file: 'memory/all.md', summary: 'x', content: longOriginal }],
 }));
 check('a plan that dumps the whole original into one file is rejected',
-  /整份原文|丢失/.test(vp(projRoot, longOriginal, dumpPlan, { scan: true }) || ''),
+  /整份原文|丢失|什么都往里塞/.test(vp(projRoot, longOriginal, dumpPlan, { scan: true }) || ''),
   vp(projRoot, longOriginal, dumpPlan, { scan: true }));
 const emptyResident = parsePlan(JSON.stringify({
   resident: [],
@@ -427,7 +427,7 @@ const emptyResident = parsePlan(JSON.stringify({
   ],
 }));
 check('a plan with an empty resident block is rejected',
-  /常驻区为空/.test(vp(projRoot, longOriginal, emptyResident, { scan: true }) || ''));
+  /常驻区为空/.test(vp(projRoot, longOriginal, emptyResident, { scan: true, maxFiles: 8 }) || ''));
 const shrunk = parsePlan(JSON.stringify({
   resident: ['# 项目说明', '- 构建', '- 部署', '- 排障', '- 约定'],
   files: [],
@@ -437,7 +437,10 @@ check('a plan whose output is much shorter than the original is rejected',
   vp(projRoot, longOriginal, shrunk, { scan: true }));
 
 // 12c. migration planner validation
-import { parsePlan, validatePlan, headingsOf } from '../dist/lib/project-migrate.js';
+import {
+  parsePlan, validatePlan, headingsOf,
+  MIGRATION_SYSTEM_PROMPT, MIGRATION_EXAMPLE,
+} from '../dist/lib/project-migrate.js';
 const original = '# 规则\n\n## 构建\nnpm run build\n\n## 部署\nsystemctl restart app\n';
 check('headingsOf extracts headings', JSON.stringify(headingsOf(original)) === JSON.stringify(['规则', '构建', '部署']));
 const goodPlan = parsePlan(JSON.stringify({
@@ -454,6 +457,83 @@ const badPathPlan = parsePlan(JSON.stringify({ resident: [original], files: [{ f
 check('validatePlan rejects an escaping file path', /非法/.test(validatePlan(projRoot, original, badPathPlan) || ''));
 const secretPlan = parsePlan(JSON.stringify({ resident: [original], files: [{ file: 'memory/k.md', summary: 'x', content: '# 构建\n\nAKIAIOSFODNN7EXAMPLE\n' }] }));
 check('validatePlan rejects secrets via the scanner', validatePlan(projRoot, original, secretPlan, { scan: true }) !== null);
+
+// 12c-bis. migration planner brief: canonical guide + coarse-topic few-shot
+import { projectGuideText as migrationGuideText } from '../dist/lib/project-guide.js';
+check('migration system prompt includes the canonical authoring guide',
+  MIGRATION_SYSTEM_PROMPT.includes('--- BEGIN AUTHORING GUIDE ---')
+    && MIGRATION_SYSTEM_PROMPT.includes(migrationGuideText())
+    && MIGRATION_SYSTEM_PROMPT.includes('--- END AUTHORING GUIDE ---'));
+check('migration system prompt teaches the coarse-topic rule',
+  /3-6 topic files/.test(MIGRATION_SYSTEM_PROMPT)
+    && /Do NOT create one file per original heading/.test(MIGRATION_SYSTEM_PROMPT)
+    && /status-and-roadmap/.test(MIGRATION_SYSTEM_PROMPT));
+check('migration system prompt carries a document+output few-shot',
+  MIGRATION_SYSTEM_PROMPT.includes('--- BEGIN EXAMPLE DOCUMENT ---')
+    && MIGRATION_SYSTEM_PROMPT.includes(MIGRATION_EXAMPLE.document)
+    && MIGRATION_SYSTEM_PROMPT.includes('--- BEGIN EXAMPLE OUTPUT ---')
+    && MIGRATION_SYSTEM_PROMPT.includes('"file": "memory/status-and-roadmap.md"'));
+const exampleRoot = fs.mkdtempSync(path.join(testDir, 'mig-example-'));
+check('the few-shot groups many source sections into few broad files',
+  headingsOf(MIGRATION_EXAMPLE.document).length === 20
+    && MIGRATION_EXAMPLE.plan.files.length === 6
+    && MIGRATION_EXAMPLE.plan.files.every((f) => headingsOf(f.content).length === 4),
+  `headings=${headingsOf(MIGRATION_EXAMPLE.document).length} files=${MIGRATION_EXAMPLE.plan.files.length}`);
+check('the few-shot output itself passes the real validator',
+  validatePlan(exampleRoot, MIGRATION_EXAMPLE.document, MIGRATION_EXAMPLE.plan, {
+    scan: true, residentCharLimit: 3000, indexCharLimit: 4000,
+  }) === null,
+  validatePlan(exampleRoot, MIGRATION_EXAMPLE.document, MIGRATION_EXAMPLE.plan, {
+    scan: true, residentCharLimit: 3000, indexCharLimit: 4000,
+  }));
+const tinyTopics = parsePlan(JSON.stringify({
+  resident: [original],
+  files: Array.from({ length: 9 }, (_, i) => ({
+    file: `memory/t${i}.md`, summary: `第 ${i} 节`, content: `## 第 ${i} 节\n\n细节 ${i}\n`,
+  })),
+}));
+check('validatePlan refuses a fragmented table-of-contents plan',
+  /超过上限|合并成少数宽主题/.test(validatePlan(exampleRoot, original, tinyTopics) || ''),
+  validatePlan(exampleRoot, original, tinyTopics));
+const noSummary = parsePlan(JSON.stringify({
+  resident: [original],
+  files: [{ file: 'memory/deploy.md', content: '## 部署\nsystemctl restart app\n' }],
+}));
+check('validatePlan requires a when-to-read summary',
+  /summary/.test(validatePlan(exampleRoot, original, noSummary) || ''),
+  validatePlan(exampleRoot, original, noSummary));
+const dumpAll = parsePlan(JSON.stringify({
+  resident: [original],
+  files: [{ file: 'memory/all.md', summary: '全部内容', content: original }],
+}));
+check('validatePlan rejects the catch-all all.md anti-pattern',
+  /什么都往里塞/.test(validatePlan(exampleRoot, original, dumpAll) || ''),
+  validatePlan(exampleRoot, original, dumpAll));
+
+// the injected planner receives the new user brief; production sends the long
+// reference material as `system`, not as a second user message to migrate.
+{
+  const briefRoot = fs.mkdtempSync(path.join(testDir, 'mig-brief-'));
+  fs.writeFileSync(path.join(briefRoot, 'AGENTS.md'), original);
+  const briefCtx = { logger: { warn() {}, info() {} }, llm: { stream: async function* () {} } };
+  let brief = '';
+  await migrateAgents(briefCtx, briefRoot, { provider: 'p', model: 'm' }, {
+    apply: false,
+    plan: async (prompt) => {
+      brief = prompt;
+      return JSON.stringify({
+        resident: ['# 规则', '- 构建：npm run build'],
+        files: [{ file: 'memory/deploy.md', summary: '部署步骤', content: '# 部署\n\nsystemctl restart app\n' }],
+      });
+    },
+  });
+  check('injected planner user brief points at the system guide and carries only the source',
+    /Apply the system brief/.test(brief)
+      && brief.includes('--- BEGIN DOCUMENT TO MIGRATE ---')
+      && brief.includes(original)
+      && !brief.includes('--- BEGIN AUTHORING GUIDE ---')
+      && !brief.includes('--- BEGIN EXAMPLE OUTPUT ---'));
+}
 
 // 13. in-chat correction pattern detection (correction.js)
 import { extractCorrectionDirective, isCorrection } from '../dist/lib/correction.js';
@@ -1228,7 +1308,7 @@ check('admin exposes the project route family', ['projectRead', 'projectWrite', 
 }
 
 // 26. migrateAgents end-to-end (planner injected; validation gates enforced)
-import { migrateAgents, DEFAULT_MIGRATION_TIMEOUT_MS } from '../dist/lib/project-migrate.js';
+import { migrateAgents, DEFAULT_MIGRATION_TIMEOUT_MS, DEFAULT_MIGRATION_MAX_FILES } from '../dist/lib/project-migrate.js';
 const migRoot = fs.mkdtempSync(path.join(testDir, 'mig-'));
 fs.writeFileSync(path.join(migRoot, 'AGENTS.md'), [
   '# 项目规则',
@@ -1271,9 +1351,10 @@ fs.writeFileSync(path.join(migProgressRoot, 'AGENTS.md'), '# 项目规则\n\n## 
 const seenStages = [];
 const seenProgress = [];
 const seenSignals = [];
+const seenRequests = [];
 const timeoutCtx = {
   logger: { warn() {}, info() {} },
-  llm: { stream: (opts) => { seenSignals.push(opts.signal); return async function* () {
+  llm: { stream: (opts) => { seenSignals.push(opts.signal); seenRequests.push(opts); return async function* () {
     yield { type: 'text-delta', text: migReply };
   }(); } },
 };
@@ -1292,6 +1373,12 @@ check('planner detail names the ten-minute timeout',
   JSON.stringify(seenProgress.find((p) => p.stage === 'planning')));
 check('configured timeout reaches the LLM call signal',
   seenSignals.length === 1 && seenSignals[0] instanceof AbortSignal, String(seenSignals.length));
+check('real planner request carries guide + few-shot in system and only source in user',
+  seenRequests.length === 1
+    && seenRequests[0].system === MIGRATION_SYSTEM_PROMPT
+    && seenRequests[0].messages.length === 1
+    && /BEGIN DOCUMENT TO MIGRATE/.test(seenRequests[0].messages[0].content[0].text)
+    && !/BEGIN AUTHORING GUIDE|BEGIN EXAMPLE DOCUMENT/.test(seenRequests[0].messages[0].content[0].text));
 
 // the host's default provider/model is available without a prior chat request
 import { defaultLlmRoute, resolveLlmRoute } from '../dist/lib/llm-helper.js';
@@ -1325,6 +1412,27 @@ const migPreview = await migrateAgents(migCtx, migRoot2, { provider: 'p', model:
   apply: false, plan: async () => migReply,
 });
 check('preview mode does not write', migPreview.migrated === false && migPreview.reason === 'preview' && migPreview.plan !== undefined);
+
+// a 17-index plan is refused BEFORE any topic file or backup is written
+const migFragmentedRoot = fs.mkdtempSync(path.join(testDir, 'migfragmented-'));
+fs.writeFileSync(path.join(migFragmentedRoot, 'AGENTS.md'), prose);
+const fragmentedReply = JSON.stringify({
+  resident: ['# 项目规则', '- 构建：npm run build'],
+  files: Array.from({ length: DEFAULT_MIGRATION_MAX_FILES + 1 }, (_, i) => ({
+    file: `memory/topic-${i}.md`, summary: `第 ${i} 节`, content: `## 第 ${i} 节\n\n细节 ${i}\n`,
+  })),
+});
+const migFragmented = await migrateAgents(migCtx, migFragmentedRoot, { provider: 'p', model: 'm' }, {
+  apply: true, scan: true, fileCharLimit: 20000, residentCharLimit: 3000, indexCharLimit: 4000,
+  plan: async () => fragmentedReply,
+});
+check('migration refuses a 17-index table-of-contents plan',
+  migFragmented.migrated === false && /超过上限|合并成少数宽主题/.test(migFragmented.reason || ''),
+  migFragmented.reason);
+check('fragmented migration writes no backup and no memory directory',
+  fs.readFileSync(path.join(migFragmentedRoot, 'AGENTS.md'), 'utf8') === prose
+    && !fs.existsSync(path.join(migFragmentedRoot, 'memory'))
+    && fs.readdirSync(migFragmentedRoot).every((n) => !n.startsWith('AGENTS.md.bak-')));
 
 // re-running a migration must never unindex existing topic files
 const migRoot4 = fs.mkdtempSync(path.join(testDir, 'mig4-'));

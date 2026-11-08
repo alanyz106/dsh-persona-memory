@@ -210,7 +210,7 @@ const STAGE_LABELS: Record<string, string> = {
   starting: '准备迁移',
   checking: '检查 AGENTS.md 形态',
   planning: '调用模型规划拆分',
-  validating: '校验计划（标题保全 / 预算 / 路径）',
+  validating: '校验计划（标题保全 / 主题粒度 / 预算 / 路径）',
   writing: '写入主题文件与索引',
   completed: '迁移完成',
   refused: '迁移被拒绝',
