@@ -92,7 +92,7 @@ export interface PluginConfig {
   projectResidentCharLimit: number;
   projectIndexCharLimit: number;
   projectAutoMigrate: boolean;
-  /** Timeout for one AGENTS.md migration planner call (default 10 minutes). */
+  /** Timeout for one AGENTS.md migration planner call (default 20 minutes). */
   projectMigrateTimeoutMs: number;
   /** Inject the "start a project memory" hint in repositories that have none. */
   projectBootstrapHint: boolean;
@@ -126,7 +126,7 @@ export interface PluginConfig {
   /**
    * How many dated snapshots to keep under `memory-backup/history/`.
    * `0` = latest-only. Every backup run (manual or periodic) writes one
-   * snapshot, so this is a rolling window (default 14).
+   * snapshot, so this is a rolling window (default 10 daily snapshots).
    */
   backupKeep: number;
   /** Write the plugin's log lines to a file under <dshHome>/logs/. */
@@ -281,8 +281,9 @@ export function apply(ctx: Context, config?: Record<string, unknown>): void {
     correctionPatternDetection: true,
     correctionHumanOnly: true,
     correctionRateLimitTurns: 3,
-    // background learning every N turns via the session's own LLM route
-    learnEnabled: true,
+    // background learning is opt-in: the shipped default keeps the agent from
+    // writing inferred facts unless the operator turns it back on
+    learnEnabled: false,
     learnHumanOnly: true,
     learnIntervalTurns: 10,
     learnRecentTurns: 2,
@@ -311,13 +312,13 @@ export function apply(ctx: Context, config?: Record<string, unknown>): void {
     // 单个 memory/<topic>.md 的字符上限（主题拆分后每个文件可以比全局记忆大）
     projectFileCharLimit: 20000,
     // AGENTS.md 常驻区字符预算：只放操作性硬约束，细节进 memory/
-    projectResidentCharLimit: 3000,
+    projectResidentCharLimit: 6000,
     // AGENTS.md 索引区（@memory/... 行）字符预算
     projectIndexCharLimit: 4000,
     // 已有 prose AGENTS.md 时是否允许辅助 LLM 自动改造成常驻+索引
     projectAutoMigrate: true,
-    // 长 AGENTS.md + 推理模型可能很慢：默认 10 分钟，而不是原来的 2 分钟。
-    projectMigrateTimeoutMs: 600000,
+    // 长 AGENTS.md + 推理模型可能很慢：默认 20 分钟，而不是原来的 2 / 10 分钟。
+    projectMigrateTimeoutMs: 1200000,
     // 无记忆的 git 仓库里是否注入「怎么建项目记忆」的引导（否则新项目永远
     // 不知道有这套机制）
     projectBootstrapHint: true,
@@ -346,11 +347,11 @@ export function apply(ctx: Context, config?: Record<string, unknown>): void {
     adminAllowedHosts: [],
     // Quick Tunnel URL file (same one dsh-web-run.sh reads for --trusted-host).
     adminAllowedHostsFile: '/var/lib/cloudflared/dsh-url.txt',
-    // auto-protect: periodic backup (minutes; 0=off) + Pi-loss fallback
-    autoBackupMin: 60,
+    // auto-protect: daily backup (minutes; 0=off) + Pi-loss fallback
+    autoBackupMin: 1440,
     autoSwitchOnPiLoss: true,
-    // 历史快照保留份数（每次备份一份，等于滚动窗口；0=只留 latest/）
-    backupKeep: 14,
+    // 历史快照保留份数（每次备份一份，等于滚动窗口；默认每天一份保留最近 10 份）
+    backupKeep: 10,
     // 文件日志：cordis logger 默认只有内存缓冲，本部署没有 console exporter，
     // info 级日志不落盘。开一个文件 sink 才能事后取证「记忆是谁改的」。
     fileLogEnabled: true,

@@ -81,14 +81,14 @@ export const BACKUP_LATEST = path.join(BACKUP_BASE, 'latest');
 /** Dated snapshots, so an accidental delete is recoverable (see `pruneSnapshots`). */
 export const BACKUP_HISTORY = path.join(BACKUP_BASE, 'history');
 /** How many dated snapshots to keep when `backupKeep` is not configured. */
-export const BACKUP_KEEP = 14;
+export const BACKUP_KEEP = 10;
 
 /**
  * Resolve how many dated snapshots to retain.
  *
  * Every backup run (manual or periodic) writes one dated snapshot, so this is
- * effectively a rolling window: the default 14 with the default hourly tick
- * means "the last 14 hours". `0` disables the dated copy entirely (latest-only,
+ * effectively a rolling window: the default 10 with the default daily tick
+ * means "the last 10 days". `0` disables the dated copy entirely (latest-only,
  * the pre-0.3.2 behaviour); negative/garbage values fall back to the default.
  */
 export function backupKeep(cfg: Record<string, unknown>): number {
@@ -410,7 +410,7 @@ export const CFG_SCHEMA: SchemaField[] = [
   { key: 'projectResidentCharLimit', type: 'number', label: '常驻区预算', group: '项目', help: 'AGENTS.md 常驻区字符上限' },
   { key: 'projectIndexCharLimit', type: 'number', label: '索引区预算', group: '项目', help: '@memory/ 指针行总字符上限' },
   { key: 'projectAutoMigrate', type: 'bool', label: '自动迁移旧 AGENTS.md', group: '项目', help: '首次写入时用辅助 LLM 把 prose AGENTS.md 拆成常驻+索引' },
-  { key: 'projectMigrateTimeoutMs', type: 'number', label: '迁移规划超时（ms）', group: '项目', help: '调用默认/会话模型拆分长 AGENTS.md 的超时；默认 600000（10 分钟），可按需调大' },
+  { key: 'projectMigrateTimeoutMs', type: 'number', label: '迁移规划超时（ms）', group: '项目', help: '调用默认/会话模型拆分长 AGENTS.md 的超时；默认 1200000（20 分钟），可按需调大' },
   { key: 'projectBootstrapHint', type: 'bool', label: '新建项目记忆引导', group: '项目', help: '无记忆的 git 仓库里注入「怎么写项目记忆」的简短引导（否则新项目永远不知道该建）' },
   { key: 'memoryFtsEnabled', type: 'bool', label: 'FTS5 全文索引', group: '检索' },
   { key: 'vectorEnabled', type: 'bool', label: '向量搜索', group: '向量', help: 'FTS5+向量 RRF 混合检索' },
@@ -423,8 +423,8 @@ export const CFG_SCHEMA: SchemaField[] = [
   { key: 'embeddingRemoteHost', type: 'string', label: '下载源镜像', group: '向量', help: '大陆可用 https://hf-mirror.com' },
   { key: 'adminProfile', type: 'string', label: '配置写回 profile', group: '管理', help: '默认 web' },
   { key: 'adminAllowedHosts', type: 'string', label: '管理接口允许的额外主机', group: '管理', help: '隧道/反代时填公网域名，多个用逗号分隔；仍要求连接来自本机回环' },
-  { key: 'autoBackupMin', type: 'number', label: '自动备份间隔（分钟）', group: '备份', help: '0=关闭；默认 60。每次备份写 latest/ 覆盖一份，并按「历史快照保留份数」留带日期的快照' },
-  { key: 'backupKeep', type: 'number', label: '历史快照保留份数', group: '备份', help: '默认 14（配合默认 60 分钟间隔约等于最近 14 小时）；0=只保留 latest/ 一份；每份都可在管理页单独恢复' },
+  { key: 'autoBackupMin', type: 'number', label: '自动备份间隔（分钟）', group: '备份', help: '0=关闭；默认 1440（每天）。每次备份写 latest/ 覆盖一份，并按「历史快照保留份数」留带日期的快照' },
+  { key: 'backupKeep', type: 'number', label: '历史快照保留份数', group: '备份', help: '默认 10（配合默认 1440 分钟间隔约等于最近 10 天）；0=只保留 latest/ 一份；每份都可在管理页单独恢复' },
   { key: 'fileLogEnabled', type: 'bool', label: '文件日志', group: '管理', help: '把插件日志（含每次记忆写入的审计行）写到 <dshHome>/logs/persona-memory.log；默认开' },
   { key: 'fileLogPath', type: 'string', label: '日志文件路径', group: '管理', help: '留空用默认 <dshHome>/logs/persona-memory.log' },
   { key: 'autoSwitchOnPiLoss', type: 'bool', label: 'Pi 丢失自动切换', group: '备份', help: 'Pi 记忆消失时自动切到本地并恢复' },
@@ -435,17 +435,17 @@ export const CFG_DEFAULTS: Record<string, unknown> = {
   memoryCharLimit: 5000, userCharLimit: 5000, enableSecretScanning: true, inject: true, injectHumanOnly: true,
   sectionOrder: 55, searchMaxResults: 10, usageNudgeThreshold: 0.9, correctionDetection: true,
   correctionPatternDetection: true, correctionHumanOnly: true,
-  correctionRateLimitTurns: 3, learnEnabled: true, learnHumanOnly: true, learnIntervalTurns: 10,
+  correctionRateLimitTurns: 3, learnEnabled: false, learnHumanOnly: true, learnIntervalTurns: 10,
   learnRecentTurns: 2, learnMaxChars: 6000,
   learnTimeoutMs: 120000, learnProjectContext: true, learnProjectContextCharLimit: 1500,
   autoConsolidate: true, consolidateStaleDays: 30, consolidateTimeoutMs: 120000,
   standingEnabled: true, standingCharLimit: 2000, standingMaxEntries: 20, failureInjectionEnabled: true,
   failureMaxAgeDays: 7, failureMaxEntries: 5, failureCharLimit: 10000,
-  projectEnabled: true, projectFileCharLimit: 20000, projectResidentCharLimit: 3000,
-  projectIndexCharLimit: 4000, projectAutoMigrate: true, projectMigrateTimeoutMs: 600000, projectBootstrapHint: true,
+  projectEnabled: true, projectFileCharLimit: 20000, projectResidentCharLimit: 6000,
+  projectIndexCharLimit: 4000, projectAutoMigrate: true, projectMigrateTimeoutMs: 1200000, projectBootstrapHint: true,
   memoryFtsEnabled: true, vectorEnabled: false, embeddingProvider: 'remote', embeddingModel: 'text-embedding-3-small',
   embeddingRemoteHost: 'https://huggingface.co', adminProfile: 'web', adminAllowedHosts: '',
-  autoBackupMin: 60, autoSwitchOnPiLoss: true, backupKeep: 14,
+  autoBackupMin: 1440, autoSwitchOnPiLoss: true, backupKeep: 10,
   fileLogEnabled: true, fileLogPath: '',
 };
 
@@ -712,7 +712,7 @@ async function copyTree(src: string, dst: string, skipDots = true): Promise<numb
  * swap is atomic-ish — build the mirror in a sibling temp dir, then rename it
  * into place — so a crash mid-backup never leaves `latest/` half-written.
  *
- * Retention: `backupKeep` (default `BACKUP_KEEP` = 14) caps how many dated
+ * Retention: `backupKeep` (default `BACKUP_KEEP` = 10) caps how many dated
  * snapshots survive; `0` turns the dated copy off and leaves only `latest/`.
  */
 export async function backupAll(
@@ -987,7 +987,7 @@ export function makeAdminRoutes(deps: AdminRouteDeps): WebRoute[] {
    */
   function listProjects(): ProjectInfo[] {
     const memoryDir = cfgStr(cfg, 'dir', resolveMemoryDir(cfg));
-    const residentLimit = cfgNum(cfg, 'projectResidentCharLimit', 3000);
+    const residentLimit = cfgNum(cfg, 'projectResidentCharLimit', 6000);
     const indexLimit = cfgNum(cfg, 'projectIndexCharLimit', 4000);
     return listRegistered(memoryDir).map((record: RegisteredProject): ProjectInfo => {
       const index: ProjectIndex = record.exists
@@ -1249,7 +1249,7 @@ export function makeAdminRoutes(deps: AdminRouteDeps): WebRoute[] {
             ? entries.map((e) => (e.file === rel ? { ...e, summary: trimmed } : e))
             : [...entries, { file: rel, summary: trimmed, exists: true, chars: 0 }];
           return { resident, entries: next };
-        }, { residentCharLimit: cfgNum(cfg, 'projectResidentCharLimit', 3000), indexCharLimit: cfgNum(cfg, 'projectIndexCharLimit', 4000) });
+        }, { residentCharLimit: cfgNum(cfg, 'projectResidentCharLimit', 6000), indexCharLimit: cfgNum(cfg, 'projectIndexCharLimit', 4000) });
         if (!indexed.ok) { writeJson(res, 400, { error: indexed.error }); return; }
       }
       const wrote = await writeMemoryFile(root, rel, content, cfgNum(cfg, 'projectFileCharLimit', 20000));
@@ -1280,7 +1280,7 @@ export function makeAdminRoutes(deps: AdminRouteDeps): WebRoute[] {
         entries: entries.some((e) => e.file === rel)
           ? entries
           : [...entries, { file: rel, summary, exists: true, chars: content.length }],
-      }), { residentCharLimit: cfgNum(cfg, 'projectResidentCharLimit', 3000), indexCharLimit: cfgNum(cfg, 'projectIndexCharLimit', 4000) });
+      }), { residentCharLimit: cfgNum(cfg, 'projectResidentCharLimit', 6000), indexCharLimit: cfgNum(cfg, 'projectIndexCharLimit', 4000) });
       if (!indexed.ok) { writeJson(res, 400, { error: indexed.error }); return; }
       log(`admin: created ${rel} in ${root}`);
       writeJson(res, 200, { ok: true, message: `已新建 ${rel} 并加入索引`, file: rel });
@@ -1297,7 +1297,7 @@ export function makeAdminRoutes(deps: AdminRouteDeps): WebRoute[] {
       const cleared = await mutateIndex(root, ({ resident, entries }) => ({
         resident,
         entries: entries.filter((e) => e.file !== rel),
-      }), { residentCharLimit: cfgNum(cfg, 'projectResidentCharLimit', 3000), indexCharLimit: cfgNum(cfg, 'projectIndexCharLimit', 4000) });
+      }), { residentCharLimit: cfgNum(cfg, 'projectResidentCharLimit', 6000), indexCharLimit: cfgNum(cfg, 'projectIndexCharLimit', 4000) });
       if (!cleared.ok) { writeJson(res, 400, { error: cleared.error }); return; }
       log(`admin: deleted ${rel} in ${root}`);
       writeJson(res, 200, {
@@ -1319,7 +1319,7 @@ export function makeAdminRoutes(deps: AdminRouteDeps): WebRoute[] {
       }
       const resident = text.split('\n').map((line) => line.replace(/\s+$/, ''));
       const result = await mutateIndex(root, ({ entries }) => ({ resident, entries }), {
-        residentCharLimit: cfgNum(cfg, 'projectResidentCharLimit', 3000),
+        residentCharLimit: cfgNum(cfg, 'projectResidentCharLimit', 6000),
         indexCharLimit: cfgNum(cfg, 'projectIndexCharLimit', 4000),
       });
       if (!result.ok) { writeJson(res, 400, { error: result.error }); return; }
@@ -1351,9 +1351,9 @@ export function makeAdminRoutes(deps: AdminRouteDeps): WebRoute[] {
           apply: body.apply === true,
           scan: cfgBool(cfg, 'enableSecretScanning', true),
           fileCharLimit: cfgNum(cfg, 'projectFileCharLimit', 20000),
-          residentCharLimit: cfgNum(cfg, 'projectResidentCharLimit', 3000),
+          residentCharLimit: cfgNum(cfg, 'projectResidentCharLimit', 6000),
           indexCharLimit: cfgNum(cfg, 'projectIndexCharLimit', 4000),
-          timeoutMs: cfgNum(cfg, 'projectMigrateTimeoutMs', 600_000),
+          timeoutMs: cfgNum(cfg, 'projectMigrateTimeoutMs', 1_200_000),
           onProgress: ({ stage, detail }) => {
             migration = { ...migration, stage, detail, elapsedMs: Date.now() - startedAt };
             log(`admin: migrate ${root} stage=${stage}${detail ? ' ' + detail : ''}`);

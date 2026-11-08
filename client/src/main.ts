@@ -862,7 +862,7 @@ function MemAdminPage(): React.ReactElement {
       const timeoutMs = Number(state.config && state.config.projectMigrateTimeoutMs);
       const timeoutLabel = Number.isFinite(timeoutMs) && timeoutMs > 0
         ? (timeoutMs >= 60_000 ? `${Math.round(timeoutMs / 60_000)} 分钟` : `${Math.round(timeoutMs / 1000)} 秒`)
-        : '10 分钟';
+        : '20 分钟';
       const routeLabel = configuredRoute ? `${configuredRoute.provider}/${configuredRoute.model}` : '当前会话或默认模型';
       const migrationReason = migratedAlready
         ? '该项目的 AGENTS.md 已经是「常驻区 + 索引」形态，无需迁移'
@@ -1106,7 +1106,7 @@ function MemAdminPage(): React.ReactElement {
         React.createElement('div', { style: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)', lineHeight: 1.6, wordBreak: 'break-all' } },
           '备份目录: ' + (state.backupDir || '')),
         React.createElement('div', { style: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)', lineHeight: 1.6, marginTop: 4 } },
-          '与 Pi 完全隔离；latest 每次覆盖写一份，历史快照保留最近 ' + (state.backupKeep ?? 14)
+          '与 Pi 完全隔离；latest 每次覆盖写一份，历史快照保留最近 ' + (state.backupKeep ?? 10)
           + ' 份（「插件配置 → 备份」可改，0=只留 latest）'),
         React.createElement('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', padding: '10px 0 0' } },
           actionBtn('立即备份', () => mutate('backup', {}), { style: { background: 'var(--dsw-alias-bg-layer-2)' } }),

@@ -171,7 +171,7 @@ function visibleText(tree) {
 
 const STATUS = {
   dir: '/tmp/memory', which: 'dsh-only',
-  config: { projectMigrateTimeoutMs: 600000 }, schema: [], backupDir: '/tmp/backup',
+  config: { projectMigrateTimeoutMs: 1200000 }, schema: [], backupDir: '/tmp/backup',
   backups: [], stores: {}, standing: { instructions: [], chars: 0 },
   indexes: {}, models: { dir: '', models: [] }, projects: [], entries: {},
   llmRouteAvailable: true, llmRoute: { provider: '9router', model: 'cbcn/hy4free' },
@@ -181,7 +181,7 @@ const WITH_PROJECT = {
   ...STATUS,
   projects: [{
     name: 'demo', root: '/tmp/demo', exists: true,
-    resident: ['# 规则'], residentChars: 10, residentLimit: 3000,
+    resident: ['# 规则'], residentChars: 10, residentLimit: 6000,
     indexChars: 0, indexLimit: 4000, entries: [], orphans: [],
   }],
 };
@@ -233,10 +233,10 @@ check('boot fetched /status through the same-origin route', calls.some((c) => c.
 const migrateBtn = findButton(tree, '迁移旧 AGENTS.md');
 check('prose project exposes a migration button', !!migrateBtn, visibleText(tree).slice(0, 250));
 check('migration hint names the inherited default model and configurable timeout',
-  /使用 9router\/cbcn\/hy4free/.test(visibleText(tree)) && /规划超时 10 分钟/.test(visibleText(tree)),
+  /使用 9router\/cbcn\/hy4free/.test(visibleText(tree)) && /规划超时 20 分钟/.test(visibleText(tree)),
   visibleText(tree).slice(-350));
 check('migration tooltip names the route and timeout',
-  !!migrateBtn && /9router\/cbcn\/hy4free/.test(String(migrateBtn.props.title)) && /10 分钟/.test(String(migrateBtn.props.title)),
+  !!migrateBtn && /9router\/cbcn\/hy4free/.test(String(migrateBtn.props.title)) && /20 分钟/.test(String(migrateBtn.props.title)),
   String(migrateBtn && migrateBtn.props.title));
 
 // Simulate a long migration: POST /projectMigrate never resolves, while the

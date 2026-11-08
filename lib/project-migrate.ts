@@ -74,10 +74,10 @@ export type MigrationProgressFn = (progress: { stage: MigrationStage; detail?: s
 
 /**
  * Migration planning can involve a long AGENTS.md and a slow reasoning model.
- * Ten minutes is the default; admin deployments may raise it further through
+ * Twenty minutes is the default; admin deployments may raise it further through
  * `projectMigrateTimeoutMs`.
  */
-export const DEFAULT_MIGRATION_TIMEOUT_MS = 600_000;
+export const DEFAULT_MIGRATION_TIMEOUT_MS = 1_200_000;
 
 /**
  * A migration that produces 17 one-heading topic files is worse than no
