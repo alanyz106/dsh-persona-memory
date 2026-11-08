@@ -15,7 +15,7 @@
 import { HarnessError } from '@deepseek-ai/dsh-llm';
 import { defineTool, type ToolRunContext } from '@deepseek-ai/dsh-tools';
 import { scanContent } from './secret-scanner.js';
-import { latestRoute, type LlmRoute } from './llm-helper.js';
+import { resolveLlmRoute, latestRoute, type LlmRoute } from './llm-helper.js';
 import { migrateAgents } from './project-migrate.js';
 import { projectGuideText } from './project-guide.js';
 import { registerProject } from './project-registry.js';
@@ -60,6 +60,7 @@ export interface ProjectMemoryToolConfig {
   projectResidentCharLimit: number;
   projectIndexCharLimit: number;
   projectAutoMigrate: boolean;
+  projectMigrateTimeoutMs: number;
   enableSecretScanning: boolean;
   searchMaxResults: number;
   /** where project-registry.json lives */
@@ -150,6 +151,7 @@ export function registerProjectMemoryTool(ctx: Context, deps: ProjectMemoryDeps)
       fileCharLimit: cfg.projectFileCharLimit,
       residentCharLimit: cfg.projectResidentCharLimit,
       indexCharLimit: cfg.projectIndexCharLimit,
+      timeoutMs: cfg.projectMigrateTimeoutMs,
     });
     if (result.migrated) {
       ctx.logger.info('[dsh-persona-memory] migrated AGENTS.md for %s', root);
@@ -230,7 +232,7 @@ export function registerProjectMemoryTool(ctx: Context, deps: ProjectMemoryDeps)
         }
         const { root, index } = projectFor(exec, deps);
         registerProject(cfg.memoryDir, root);
-        const route = exec.agent?.session ? latestRoute(exec.agent.session) : undefined;
+        const route = resolveLlmRoute(ctx, exec.agent?.session ? latestRoute(exec.agent.session) : undefined);
 
         switch (args.action) {
           case 'list':
@@ -394,6 +396,7 @@ export function registerProjectMemoryTool(ctx: Context, deps: ProjectMemoryDeps)
               fileCharLimit: cfg.projectFileCharLimit,
               residentCharLimit: cfg.projectResidentCharLimit,
               indexCharLimit: cfg.projectIndexCharLimit,
+              timeoutMs: cfg.projectMigrateTimeoutMs,
             });
             if (result.migrated) {
               deps.onWrite?.(root);

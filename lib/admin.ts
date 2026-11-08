@@ -410,6 +410,7 @@ export const CFG_SCHEMA: SchemaField[] = [
   { key: 'projectResidentCharLimit', type: 'number', label: '常驻区预算', group: '项目', help: 'AGENTS.md 常驻区字符上限' },
   { key: 'projectIndexCharLimit', type: 'number', label: '索引区预算', group: '项目', help: '@memory/ 指针行总字符上限' },
   { key: 'projectAutoMigrate', type: 'bool', label: '自动迁移旧 AGENTS.md', group: '项目', help: '首次写入时用辅助 LLM 把 prose AGENTS.md 拆成常驻+索引' },
+  { key: 'projectMigrateTimeoutMs', type: 'number', label: '迁移规划超时（ms）', group: '项目', help: '调用默认/会话模型拆分长 AGENTS.md 的超时；默认 600000（10 分钟），可按需调大' },
   { key: 'projectBootstrapHint', type: 'bool', label: '新建项目记忆引导', group: '项目', help: '无记忆的 git 仓库里注入「怎么写项目记忆」的简短引导（否则新项目永远不知道该建）' },
   { key: 'memoryFtsEnabled', type: 'bool', label: 'FTS5 全文索引', group: '检索' },
   { key: 'vectorEnabled', type: 'bool', label: '向量搜索', group: '向量', help: 'FTS5+向量 RRF 混合检索' },
@@ -441,7 +442,7 @@ export const CFG_DEFAULTS: Record<string, unknown> = {
   standingEnabled: true, standingCharLimit: 2000, standingMaxEntries: 20, failureInjectionEnabled: true,
   failureMaxAgeDays: 7, failureMaxEntries: 5, failureCharLimit: 10000,
   projectEnabled: true, projectFileCharLimit: 20000, projectResidentCharLimit: 3000,
-  projectIndexCharLimit: 4000, projectAutoMigrate: true, projectBootstrapHint: true,
+  projectIndexCharLimit: 4000, projectAutoMigrate: true, projectMigrateTimeoutMs: 600000, projectBootstrapHint: true,
   memoryFtsEnabled: true, vectorEnabled: false, embeddingProvider: 'remote', embeddingModel: 'text-embedding-3-small',
   embeddingRemoteHost: 'https://huggingface.co', adminProfile: 'web', adminAllowedHosts: '',
   autoBackupMin: 60, autoSwitchOnPiLoss: true, backupKeep: 14,
@@ -797,8 +798,8 @@ export interface AdminRouteDeps {
   ctx: Context;
   /**
    * Resolve the model route used by the migration planner. Called per request
-   * because a route only exists after a session has issued a request; the
-   * admin page can be opened before any session exists.
+   * because the host's default provider/model can change (and an explicit
+   * session route may supersede it) while the admin page stays open.
    */
   getRoute?: () => LlmRoute | undefined;
   /** absolute path to the active profile's cordis.patch.yml */
@@ -1066,8 +1067,9 @@ export function makeAdminRoutes(deps: AdminRouteDeps): WebRoute[] {
       models: listModels(),
       projects: listProjects(),
       entries: listEntries(),
-      /** Migration needs the auxiliary LLM route; without one the UI disables the button. */
+      /** Migration uses the session route or the host's configured default model. */
       llmRouteAvailable: !!route,
+      llmRoute: route ? { provider: route.provider, model: route.model } : null,
       migration: migrationSnapshot(),
       ts: Date.now(),
     };
@@ -1127,7 +1129,12 @@ export function makeAdminRoutes(deps: AdminRouteDeps): WebRoute[] {
      *  can show a real stage + elapsed time while the mutation is in flight. */
     { kind: 'exact', path: '/api/persona-memory/projectMigrateStatus', handler: async (req: IncomingMessage, res: ServerResponse) => {
       if (!guard(req, res, 'GET')) return;
-      writeJson(res, 200, { migration: migrationSnapshot(), llmRouteAvailable: !!deps.getRoute?.() });
+      const route = deps.getRoute?.();
+      writeJson(res, 200, {
+        migration: migrationSnapshot(),
+        llmRouteAvailable: !!route,
+        llmRoute: route ? { provider: route.provider, model: route.model } : null,
+      });
     } },
     { kind: 'exact', path: '/api/persona-memory/checkModel', handler: async (req: IncomingMessage, res: ServerResponse) => {
       if (!guard(req, res, 'GET')) return;
@@ -1346,6 +1353,7 @@ export function makeAdminRoutes(deps: AdminRouteDeps): WebRoute[] {
           fileCharLimit: cfgNum(cfg, 'projectFileCharLimit', 20000),
           residentCharLimit: cfgNum(cfg, 'projectResidentCharLimit', 3000),
           indexCharLimit: cfgNum(cfg, 'projectIndexCharLimit', 4000),
+          timeoutMs: cfgNum(cfg, 'projectMigrateTimeoutMs', 600_000),
           onProgress: ({ stage, detail }) => {
             migration = { ...migration, stage, detail, elapsedMs: Date.now() - startedAt };
             log(`admin: migrate ${root} stage=${stage}${detail ? ' ' + detail : ''}`);

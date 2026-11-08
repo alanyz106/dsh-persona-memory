@@ -51,8 +51,10 @@ interface StatusPayload {
   models: { dir: string; models: Array<{ name: string }> };
   projects: ProjectInfo[];
   entries: Record<string, EntryItem[]>;
-  /** Auxiliary LLM route for the AGENTS.md migration planner, if any session has issued a request yet. */
+  /** Whether the host has a session or configured default route for migration planning. */
   llmRouteAvailable?: boolean;
+  /** The actual provider/model the planner will use (for the UI hint). */
+  llmRoute?: { provider: string; model: string } | null;
   /** A migration currently occupying the host's single-flight slot. */
   migration?: MigrationStatus | null;
   ts: number;
@@ -207,7 +209,7 @@ function actionLabel(action: string): string {
 const STAGE_LABELS: Record<string, string> = {
   starting: '准备迁移',
   checking: '检查 AGENTS.md 形态',
-  planning: '调用模型规划拆分（最长 120 秒）',
+  planning: '调用模型规划拆分',
   validating: '校验计划（标题保全 / 预算 / 路径）',
   writing: '写入主题文件与索引',
   completed: '迁移完成',
@@ -478,8 +480,10 @@ function MemAdminPage(): React.ReactElement {
       // or a long migration would re-render the whole page every tick.
       setMigration((prev) => JSON.stringify(prev) === JSON.stringify(next) ? prev : next);
       const route = !!(res && res.llmRouteAvailable);
-      setState((prev) => prev && prev.llmRouteAvailable !== route
-        ? Object.assign({}, prev, { llmRouteAvailable: route }) : prev);
+      const nextRoute = (res && res.llmRoute) || null;
+      setState((prev) => prev
+        && (prev.llmRouteAvailable !== route || JSON.stringify(prev.llmRoute || null) !== JSON.stringify(nextRoute))
+        ? Object.assign({}, prev, { llmRouteAvailable: route, llmRoute: nextRoute }) : prev);
       // Keep the finished stage visible until the next action: the notice can
       // be dismissed, but the strip should still say why a run stopped.
       if (!next.active && next.finishedAt && next.stage) setLastOutcome((prev) => JSON.stringify(prev) === JSON.stringify(next) ? prev : next);
@@ -854,13 +858,19 @@ function MemAdminPage(): React.ReactElement {
       const migratedAlready = proj.entries.length > 0;
       const noLlmRoute = !routeAvailable && state.llmRouteAvailable !== undefined;
       const canMigrate = proj.exists && !migratedAlready && (routeAvailable || state.llmRouteAvailable === undefined);
+      const configuredRoute = state.llmRoute;
+      const timeoutMs = Number(state.config && state.config.projectMigrateTimeoutMs);
+      const timeoutLabel = Number.isFinite(timeoutMs) && timeoutMs > 0
+        ? (timeoutMs >= 60_000 ? `${Math.round(timeoutMs / 60_000)} 分钟` : `${Math.round(timeoutMs / 1000)} 秒`)
+        : '10 分钟';
+      const routeLabel = configuredRoute ? `${configuredRoute.provider}/${configuredRoute.model}` : '当前会话或默认模型';
       const migrationReason = migratedAlready
         ? '该项目的 AGENTS.md 已经是「常驻区 + 索引」形态，无需迁移'
         : !proj.exists
           ? '该项目还没有 AGENTS.md，没有可迁移的内容'
           : noLlmRoute
-            ? '还没有可用的模型路由：先在当前 dsh web 里发一次会话请求，让插件记录所用的 provider/model，再来迁移'
-            : '把纯散文的 AGENTS.md 拆成「常驻区 + @memory/ 索引」';
+            ? '还没有可用的模型路由：请在 profile 的 agent-default-model 里配置默认 provider/model'
+            : `用 ${routeLabel} 把纯散文的 AGENTS.md 拆成「常驻区 + @memory/ 索引」（超时 ${timeoutLabel}）`;
       const residentEditing = projResidentEdit && projResidentEdit.project === proj.name;
       const creating = projCreate && projCreate.project === proj.name;
       const editingHere = projEdit && projEdit.project === proj.name;
@@ -994,9 +1004,9 @@ function MemAdminPage(): React.ReactElement {
                   migratedAlready
                     ? '已迁移，按钮已停用。继续精简常驻区请用上方「编辑常驻区」。'
                     : noLlmRoute
-                      ? '迁移需要一个模型路由：先在当前 dsh web 里发一次会话请求，按钮会自动启用。'
+                      ? '没有默认模型路由：请在 profile 的 agent-default-model 里配置 provider/model 后重启 web。'
                       : canMigrate
-                        ? '把散文 AGENTS.md 拆成「常驻区 + 索引」，原文另存 .bak。调用模型规划拆分，最长约 120 秒。'
+                        ? `使用 ${routeLabel} 拆分「常驻区 + 索引」，原文另存 .bak；规划超时 ${timeoutLabel}，可在插件配置里调整。`
                         : '该项目还没有 AGENTS.md。'),
               ),
         ) : null,

@@ -27,7 +27,7 @@ import { createMemoryStore, type MemoryStore } from './lib/memory-store.js';
 import { registerMemorySearchTool } from './lib/memory-search-tool.js';
 import { registerMemoryTool, type MemoryToolConfig } from './lib/memory-tool.js';
 import { registerProjectMemoryTool } from './lib/project-memory-tool.js';
-import { type LlmRoute } from './lib/llm-helper.js';
+import { resolveLlmRoute, type LlmRoute } from './lib/llm-helper.js';
 import { readIndex, resolveProjectRoot, type ProjectIndex } from './lib/project-memory.js';
 import { projectBootstrapBlock, projectCoreLines, projectHasMemory } from './lib/project-guide.js';
 import { findGitRepoRoot } from './lib/projects.js';
@@ -92,6 +92,8 @@ export interface PluginConfig {
   projectResidentCharLimit: number;
   projectIndexCharLimit: number;
   projectAutoMigrate: boolean;
+  /** Timeout for one AGENTS.md migration planner call (default 10 minutes). */
+  projectMigrateTimeoutMs: number;
   /** Inject the "start a project memory" hint in repositories that have none. */
   projectBootstrapHint: boolean;
   memoryFtsEnabled: boolean;
@@ -314,6 +316,8 @@ export function apply(ctx: Context, config?: Record<string, unknown>): void {
     projectIndexCharLimit: 4000,
     // 已有 prose AGENTS.md 时是否允许辅助 LLM 自动改造成常驻+索引
     projectAutoMigrate: true,
+    // 长 AGENTS.md + 推理模型可能很慢：默认 10 分钟，而不是原来的 2 分钟。
+    projectMigrateTimeoutMs: 600000,
     // 无记忆的 git 仓库里是否注入「怎么建项目记忆」的引导（否则新项目永远
     // 不知道有这套机制）
     projectBootstrapHint: true,
@@ -402,14 +406,16 @@ export function apply(ctx: Context, config?: Record<string, unknown>): void {
   // 所以这里必须能拿到会话 cwd。
   registerLifecycleHooks(ctx, store, cfg as LearningConfig, cwdOfSession);
 
-  // 最近一次请求用过的模型路由。辅助 LLM 特性（学习、合并、迁移）都复用它；
-  // 管理页可能在任何会话出现之前被打开，所以这里按事件更新、按需读取。
+  // 最近一次请求用过的模型路由。辅助 LLM 特性（学习、合并、迁移）优先复用它；
+  // 管理页可能在任何会话出现之前被打开，所以没有会话路由时回退到宿主的
+  // agentDefaultModel 配置（profile patch 里的默认 provider/model）。
   let lastRoute: LlmRoute | undefined;
   ctx.on('session/event', (_session, event) => {
     if (event.type !== 'request/header') return;
     const config = event.data?.header?.config;
     if (config?.provider && config?.model) lastRoute = { provider: config.provider, model: config.model };
   });
+  const auxiliaryRoute = (): LlmRoute | undefined => resolveLlmRoute(ctx, lastRoute);
 
   // 项目记忆：AGENTS.md（常驻区 + @ 指针索引）+ memory/ 主题文件。
   // 作用域 = 会话工作目录所属的 git 仓库根（worktree 共享），无 project 参数。
@@ -420,6 +426,7 @@ export function apply(ctx: Context, config?: Record<string, unknown>): void {
         projectResidentCharLimit: cfg.projectResidentCharLimit,
         projectIndexCharLimit: cfg.projectIndexCharLimit,
         projectAutoMigrate: cfg.projectAutoMigrate,
+        projectMigrateTimeoutMs: cfg.projectMigrateTimeoutMs,
         enableSecretScanning: cfg.enableSecretScanning,
         searchMaxResults: cfg.searchMaxResults,
         memoryDir: cfg.dir,
@@ -438,7 +445,7 @@ export function apply(ctx: Context, config?: Record<string, unknown>): void {
       vector,
       cfg,
       ctx,
-      getRoute: () => lastRoute,
+      getRoute: auxiliaryRoute,
       profilePatch: profilePatchPath(profileName),
       log: (s) => ctx.logger.info(s),
     });

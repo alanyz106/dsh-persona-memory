@@ -66,6 +66,13 @@ export type MigrationStage =
 /** Progress callback — best-effort; a broken reporter must never fail a migration. */
 export type MigrationProgressFn = (progress: { stage: MigrationStage; detail?: string }) => void;
 
+/**
+ * Migration planning can involve a long AGENTS.md and a slow reasoning model.
+ * Ten minutes is the default; admin deployments may raise it further through
+ * `projectMigrateTimeoutMs`.
+ */
+export const DEFAULT_MIGRATION_TIMEOUT_MS = 600_000;
+
 const MIGRATION_SYSTEM_PROMPT = `You restructure an existing project instruction document into "resident rules + lazy-loaded topic files".
 
 Resident block (goes at the top of AGENTS.md, injected into every request):
@@ -306,18 +313,22 @@ export async function migrateAgents(
     return refuse(`AGENTS.md 已有 ${index.entries.length} 条 @memory/ 索引，属于迁移后形态；常驻区如需继续拆分请手动编辑（迁移只处理纯散文文档）`);
   }
   if (!route) {
-    return refuse('还没有可用的模型路由：请先在 dsh web 里发一次会话请求，让插件记录当前会话使用的 provider/model，然后重试迁移');
+    return refuse('还没有可用的模型路由：请在 profile 的 cordis.patch.yml 里配置 agent-default-model 的 provider/model');
   }
 
   const original = index.resident.join('\n');
   if (!original.trim()) return refuse('没有可迁移的内容');
 
-  report('planning', `调用 ${route.provider}/${route.model} 规划拆分（最长 ${Math.round((opts.timeoutMs ?? 120_000) / 1000)} 秒）`);
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_MIGRATION_TIMEOUT_MS;
+  const timeoutLabel = timeoutMs >= 60_000
+    ? `${Math.round(timeoutMs / 60_000)} 分钟`
+    : `${Math.round(timeoutMs / 1000)} 秒`;
+  report('planning', `调用 ${route.provider}/${route.model} 规划拆分（最长 ${timeoutLabel}）`);
   let reply: string;
   try {
     reply = opts.plan
       ? await opts.plan(buildPrompt(original))
-      : await callLlm(ctx, route, MIGRATION_SYSTEM_PROMPT, buildPrompt(original), opts.timeoutMs ?? 120_000);
+      : await callLlm(ctx, route, MIGRATION_SYSTEM_PROMPT, buildPrompt(original), timeoutMs);
   } catch (err) {
     return fail(`调用模型失败：${(err as Error | undefined)?.message ?? String(err)}`);
   }

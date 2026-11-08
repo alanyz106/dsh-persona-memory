@@ -11,6 +11,37 @@ export interface LlmRoute {
   model: string;
 }
 
+/**
+ * Resolve the host's default provider/model without requiring a prior chat
+ * request. `agentDefaultModel` is configured by the active profile patch and
+ * is what Agent entry points use for fresh sessions. `ctx.get` keeps this
+ * optional: hosts/older versions without the service simply fall back to the
+ * session-recorded route.
+ */
+export function defaultLlmRoute(ctx: Context): LlmRoute | undefined {
+  try {
+    const service = ctx.get?.('agentDefaultModel') as {
+      currentSelection?: () => { provider?: unknown; model?: unknown };
+    } | undefined;
+    const selection = service?.currentSelection?.();
+    if (typeof selection?.provider === 'string' && selection.provider.trim()
+      && typeof selection.model === 'string' && selection.model.trim()) {
+      return { provider: selection.provider.trim(), model: selection.model.trim() };
+    }
+  } catch {
+    // A missing or incompatible service must never break the memory plugin.
+  }
+  return undefined;
+}
+
+/**
+ * Prefer the route last used by a real session (it may be an explicit model
+ * override), otherwise inherit the deployment's default provider/model.
+ */
+export function resolveLlmRoute(ctx: Context, sessionRoute?: LlmRoute | undefined): LlmRoute | undefined {
+  return sessionRoute ?? defaultLlmRoute(ctx);
+}
+
 /** @returns the session's latest request route */
 export function latestRoute(session: Session): LlmRoute | undefined {
   const events = sessionEvents(session);
@@ -49,7 +80,11 @@ export function sessionEvents(session: Session): readonly SessionEvent[] {
  * @returns assembled text output
  */
 export async function callLlm(ctx: Context, route: LlmRoute, system: string, prompt: string, timeoutMs: number): Promise<string> {
-  const signal = AbortSignal.timeout(timeoutMs);
+  // AbortSignal.timeout() is the real deadline. Mirror it on `.timeout` too:
+  // older hosts/tests may inspect the signal, and it makes the configured
+  // migration timeout verifiable without waiting for the deadline itself.
+  const signal = AbortSignal.timeout(timeoutMs) as AbortSignal & { timeout?: number };
+  (signal as { timeout?: number }).timeout = timeoutMs;
   const messages = [createUserMessage({ content: [{ type: 'text', text: prompt }], source: { kind: 'user' } })];
   let out = '';
   const stream = ctx.llm.stream({

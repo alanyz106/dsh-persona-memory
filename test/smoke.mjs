@@ -592,6 +592,7 @@ registerProjectMemoryTool(projToolCtx, {
     projectResidentCharLimit: 3000,
     projectIndexCharLimit: 4000,
     projectAutoMigrate: false,
+    projectMigrateTimeoutMs: 600000,
     enableSecretScanning: true,
     searchMaxResults: 10,
     memoryDir: toolRegistryDir,
@@ -665,7 +666,8 @@ let guideTool;
 registerProjectMemoryTool({ tools: { register: (t) => { guideTool = t; } }, logger: { warn: () => {}, info: () => {} } }, {
   config: {
     projectFileCharLimit: 20000, projectResidentCharLimit: 3000, projectIndexCharLimit: 4000,
-    projectAutoMigrate: false, enableSecretScanning: true, searchMaxResults: 10, memoryDir: guideRegistry,
+    projectAutoMigrate: false, projectMigrateTimeoutMs: 600000,
+    enableSecretScanning: true, searchMaxResults: 10, memoryDir: guideRegistry,
   },
   cwdOf: () => guideRoot,
 });
@@ -1025,7 +1027,7 @@ const routes = makeAdminRoutes({
   store: createMemoryStore({ dir: backupMemDir, limits: BIG_LIMITS }),
   standing: createStandingStore({ dir: backupMemDir, maxEntries: 20, maxChars: 2000 }),
   vector: { available: async () => false, search: async () => null, rebuild: async () => 0 },
-  cfg: { dir: backupMemDir, autoBackupMin: 0, autoSwitchOnPiLoss: false },
+  cfg: { dir: backupMemDir, autoBackupMin: 0, autoSwitchOnPiLoss: false, projectMigrateTimeoutMs: 600000 },
   ctx: routeCtx,
   getRoute: () => undefined,
   profilePatch: path.join(testDir, 'cordis.patch.yml'),
@@ -1095,7 +1097,7 @@ check('admin exposes the project route family', ['projectRead', 'projectWrite', 
     store: createMemoryStore({ dir: migAdminDir, limits: BIG_LIMITS }),
     standing: createStandingStore({ dir: migAdminDir, maxEntries: 20, maxChars: 2000 }),
     vector: {},
-    cfg: { dir: migAdminDir, autoBackupMin: 0 },
+    cfg: { dir: migAdminDir, autoBackupMin: 0, projectMigrateTimeoutMs: 600000 },
     ctx: { logger: { warn() {}, info() {} } },
     getRoute: () => undefined,
     profilePatch: path.join(testDir, 'p.yml'),
@@ -1150,12 +1152,16 @@ check('admin exposes the project route family', ['projectRead', 'projectWrite', 
   // The host's real planner path is ctx.llm.stream (see lib/llm-helper.ts).
   // Holding this generator at a gate makes the LLM call observably in flight
   // while the progress route is polled.
+  const seenTimeouts = [];
   const slowCtx = {
     logger: { warn() {}, info() {} },
     llm: {
-      stream: async function* () {
-        await plannerGate;
-        yield { type: 'text-delta', text: plan };
+      stream: (opts) => {
+        seenTimeouts.push(Math.round(opts.signal?.timeout ?? 0));
+        return async function* () {
+          await plannerGate;
+          yield { type: 'text-delta', text: plan };
+        }();
       },
     },
   };
@@ -1163,7 +1169,7 @@ check('admin exposes the project route family', ['projectRead', 'projectWrite', 
     store: createMemoryStore({ dir: progDir, limits: BIG_LIMITS }),
     standing: createStandingStore({ dir: progDir, maxEntries: 20, maxChars: 2000 }),
     vector: {},
-    cfg: { dir: progDir, autoBackupMin: 0 },
+    cfg: { dir: progDir, autoBackupMin: 0, projectMigrateTimeoutMs: 900000 },
     ctx: slowCtx,
     getRoute: () => ({ provider: 'p', model: 'm' }),
     profilePatch: path.join(testDir, 'prog.yml'),
@@ -1195,8 +1201,11 @@ check('admin exposes the project route family', ['projectRead', 'projectWrite', 
   check('migration progress reports a real stage while the planner runs',
     inFlight.payload.migration.active === true && inFlight.payload.migration.stage === 'planning',
     JSON.stringify(inFlight.payload.migration));
-  check('status payload reports an available LLM route',
-    (await call(statusAdmin, undefined, 'GET')).payload.llmRouteAvailable === true);
+  const statusPayload = (await call(statusAdmin, undefined, 'GET')).payload;
+  check('status payload reports the available LLM route',
+    statusPayload.llmRouteAvailable === true
+      && statusPayload.llmRoute.provider === 'p' && statusPayload.llmRoute.model === 'm',
+    JSON.stringify(statusPayload.llmRoute));
   const second = await call(migrateRoute, reqBody);
   check('a second migration is refused while one is in flight',
     second.status === 200 && second.payload.migrated === false && /已有迁移正在处理/.test(second.payload.reason),
@@ -1212,10 +1221,14 @@ check('admin exposes the project route family', ['projectRead', 'projectWrite', 
   check('migration stages are logged for diagnosis',
     stages.some((line) => line.includes('stage=planning')) && stages.some((line) => line.includes('stage=completed')),
     String(stages.length));
+  check('admin migration passes the configured timeout to the planner',
+    seenTimeouts.includes(900000), JSON.stringify(seenTimeouts));
+  check('progress detail shows the configured 15-minute timeout',
+    stages.some((line) => line.includes('最长 15 分钟')), stages.find((line) => line.includes('stage=planning')) || '');
 }
 
 // 26. migrateAgents end-to-end (planner injected; validation gates enforced)
-import { migrateAgents } from '../dist/lib/project-migrate.js';
+import { migrateAgents, DEFAULT_MIGRATION_TIMEOUT_MS } from '../dist/lib/project-migrate.js';
 const migRoot = fs.mkdtempSync(path.join(testDir, 'mig-'));
 fs.writeFileSync(path.join(migRoot, 'AGENTS.md'), [
   '# 项目规则',
@@ -1247,22 +1260,56 @@ check('migration left a backup of the original', migOk.backup !== undefined && f
 const migNoRouteRoot = fs.mkdtempSync(path.join(testDir, 'mignoroute-'));
 fs.writeFileSync(path.join(migNoRouteRoot, 'AGENTS.md'), '# 规则\n\n## 构建\nnpm run build\n');
 const migNoRoute = await migrateAgents(migCtx, migNoRouteRoot, undefined, { apply: true });
-check('missing LLM route gives an actionable reason',
-  migNoRoute.migrated === false && /会话请求/.test(migNoRoute.reason || '') && !/no-llm-route/.test(migNoRoute.reason || ''),
+check('missing LLM route points at the default model config',
+  migNoRoute.migrated === false && /agent-default-model/.test(migNoRoute.reason || '') && !/先.*会话请求/.test(migNoRoute.reason || ''),
   migNoRoute.reason);
 
-// progress callbacks must expose the long LLM stage before any disk write
+// progress callbacks must expose the long LLM stage before any disk write;
+// the default timeout is ten minutes, and the planner call receives it.
 const migProgressRoot = fs.mkdtempSync(path.join(testDir, 'migprogress-'));
 fs.writeFileSync(path.join(migProgressRoot, 'AGENTS.md'), '# 项目规则\n\n## 构建\nnpm run build\n\n## 部署\nsystemctl restart app\n');
 const seenStages = [];
-const progOk = await migrateAgents(migCtx, migProgressRoot, { provider: 'p', model: 'm' }, {
+const seenProgress = [];
+const seenSignals = [];
+const timeoutCtx = {
+  logger: { warn() {}, info() {} },
+  llm: { stream: (opts) => { seenSignals.push(opts.signal); return async function* () {
+    yield { type: 'text-delta', text: migReply };
+  }(); } },
+};
+const progOk = await migrateAgents(timeoutCtx, migProgressRoot, { provider: 'p', model: 'm' }, {
   apply: true, scan: true, fileCharLimit: 20000, residentCharLimit: 3000, indexCharLimit: 4000,
-  plan: async () => migReply,
-  onProgress: ({ stage }) => seenStages.push(stage),
+  onProgress: (progress) => { seenStages.push(progress.stage); seenProgress.push(progress); },
+  timeoutMs: 600000,
 });
 check('migration reports planning and completion stages',
   progOk.migrated === true && seenStages.includes('planning') && seenStages.includes('completed'),
   seenStages.join(','));
+check('default migration timeout is ten minutes',
+  DEFAULT_MIGRATION_TIMEOUT_MS === 600000, String(DEFAULT_MIGRATION_TIMEOUT_MS));
+check('planner detail names the ten-minute timeout',
+  seenProgress.some((p) => p.stage === 'planning' && /10 分钟/.test(p.detail || '')),
+  JSON.stringify(seenProgress.find((p) => p.stage === 'planning')));
+check('configured timeout reaches the LLM call signal',
+  seenSignals.length === 1 && seenSignals[0] instanceof AbortSignal, String(seenSignals.length));
+
+// the host's default provider/model is available without a prior chat request
+import { defaultLlmRoute, resolveLlmRoute } from '../dist/lib/llm-helper.js';
+const defaultRouteCtx = {
+  get: (name) => name === 'agentDefaultModel'
+    ? { currentSelection: () => ({ provider: '9router', model: 'cbcn/hy4free' }) }
+    : undefined,
+};
+const inherited = defaultLlmRoute(defaultRouteCtx);
+check('defaultLlmRoute inherits the host default model',
+  inherited && inherited.provider === '9router' && inherited.model === 'cbcn/hy4free',
+  JSON.stringify(inherited));
+check('resolveLlmRoute prefers a real session route',
+  resolveLlmRoute(defaultRouteCtx, { provider: 'session-p', model: 'session-m' }).provider === 'session-p');
+check('resolveLlmRoute falls back without a session route',
+  resolveLlmRoute(defaultRouteCtx, undefined).model === 'cbcn/hy4free');
+check('defaultLlmRoute degrades on hosts without the service',
+  defaultLlmRoute({ get: () => undefined }) === undefined && defaultLlmRoute({}) === undefined);
 
 // a lossy plan must leave the file untouched
 const migRoot2 = fs.mkdtempSync(path.join(testDir, 'mig2-'));

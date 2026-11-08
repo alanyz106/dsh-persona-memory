@@ -33,7 +33,7 @@
 | `memory_search`（混合检索，全局记忆） | 优先 **FTS5 + 语义向量（RRF 融合）**：FTS5 全文索引（`<dir>/.memory-index.sqlite`，mtime 自动重建）+ 向量索引（`vectorIndexDir` 下 `.memory-vec.sqlite`，只存 embedding、指纹增量同步、纯 JS 余弦）；向量未启用时走 FTS5，SQLite 不可用时回退子串扫描；结果始终 ≤`searchMaxResults` 条、只进工具输出，注入成本不随检索方式增加 |
 | 用量提示 | 所有 `memory` 操作返回用量百分比；达 90%（`usageNudgeThreshold`）提醒用 `rewrite` 合并 |
 | `/standing` 命令 | 用户管理常驻指令（列出 / add / remove / clear） |
-| WebUI 记忆管理页 | 设置页「记忆管理」区块（`settings.section` slot）：常驻指令增删改、三记忆文件条目编辑/删除、**项目记忆卡**（常驻区编辑 + `@` 索引行按文件编辑/删除 + 孤儿文件 + 新建 + 迁移 + 手动登记；迁移期间刷新按钮及所有操作禁用，显示宿主真实阶段、操作名与已等待时间）、FTS5/向量索引状态与重建、向量搜索配置、已下载模型扫描与缓存检测、**插件配置卡**（schema 驱动全量配置）、**本地备份卡**（左侧：备份目录 / 立即备份；右侧：快照列表，每行带时间戳 + 文件数 + 独立「恢复」按钮，`latest` 只是第一行；项目记忆按注册表快照） |
+| WebUI 记忆管理页 | 设置页「记忆管理」区块（`settings.section` slot）：常驻指令增删改、三记忆文件条目编辑/删除、**项目记忆卡**（常驻区编辑 + `@` 索引行按文件编辑/删除 + 孤儿文件 + 新建 + 迁移 + 手动登记；迁移期间刷新按钮及所有操作禁用，显示宿主真实阶段、所用模型、超时与已等待时间）、FTS5/向量索引状态与重建、向量搜索配置、已下载模型扫描与缓存检测、**插件配置卡**（schema 驱动全量配置）、**本地备份卡**（左侧：备份目录 / 立即备份；右侧：快照列表，每行带时间戳 + 文件数 + 独立「恢复」按钮，`latest` 只是第一行；项目记忆按注册表快照） |
 
 ### C. 自动学习机制
 
@@ -209,6 +209,7 @@ file: 安装是真实副本——改代码后须重新构建、`dsh plugin --pro
 | `projectResidentCharLimit` | `3000` | `AGENTS.md` 常驻区字符预算（每次请求都注入，只放操作性硬约束） |
 | `projectIndexCharLimit` | `4000` | `AGENTS.md` 索引区（`@memory/...` 行）字符预算 |
 | `projectAutoMigrate` | `true` | 首次写入遇到 prose `AGENTS.md` 时，是否允许辅助 LLM 自动拆成常驻 + 索引 |
+| `projectMigrateTimeoutMs` | `600000` | 一次迁移规划调用（辅助 LLM）的超时，默认 10 分钟；长 `AGENTS.md` 或推理模型可在管理页调大。学习/合并的超时仍是各自独立的 `learnTimeoutMs` / `consolidateTimeoutMs` |
 | `projectBootstrapHint` | `true` | 无记忆的 git 仓库里注入「怎么建项目记忆」的引导（约 330 字符）；关掉后新项目不再收到提示 |
 
 `dir` 默认解析顺序：① 显式 `config.dir` → ② `~/.pi/agent/pi-hermes-memory`（若已存在 `MEMORY.md`，即与 Pi 共用）→ ③ `$DSH_HOME/memory`（默认 `~/.dsh/memory`）。
@@ -315,7 +316,7 @@ file: 安装是真实副本——改代码后须重新构建、`dsh plugin --pro
 3. **校验闸门**：计划必须可解析、每个文件路径过 `safeMemoryRel`、内容过 scanner、不超预算，且**原文每个标题都必须能在常驻区或某个主题文件里找到**——任一不满足就整份放弃、文件不动；
 4. 通过后原文另存 `AGENTS.md.bak-<时间戳>`，再写主题文件与新的 `AGENTS.md`。
 
-迁移复用**当前 web 进程最近一次会话请求**的 `provider/model` 路由，最长等待 120 秒；管理页打开时尚未有过会话请求就没有可用路由，此时迁移按钮会停用并提示「先在当前 dsh web 里发一次会话请求」。管理页点「迁移旧 AGENTS.md」后，宿主按真实阶段（检查 AGENTS.md 形态 → 调用模型规划拆分 → 校验计划 → 写入主题文件与索引）上报进度，页面显示操作名、阶段说明与已等待时间，同时**刷新按钮和所有会改文件的按钮/输入框都禁用**；同一时刻只允许一个迁移在跑（另一个标签页或双击会被明确拒绝）。每个阶段也会写进 `<dshHome>/logs/persona-memory.log`（`admin: migrate <root> stage=...`），便于事后核对「处理中」是否真的在推进。失败/拒绝时页面保留卡片并给出可读原因，完成后显示新建主题文件数与 `.bak` 文件名。
+迁移优先复用**当前 web 进程最近一次会话请求**的 `provider/model` 路由；用户还没在 web 里对话过时，直接继承宿主的 `agentDefaultModel`（profile `cordis.patch.yml` 里 `agent-default-model` 的默认 provider/model），**不需要先发一次会话请求**。只有连默认模型都没配置时，管理页才停用按钮并提示配置 `agent-default-model`。一次规划调用的默认超时为 10 分钟（`projectMigrateTimeoutMs`，可在插件配置里调大），适配长 `AGENTS.md` 和慢速推理模型。管理页点「迁移旧 AGENTS.md」后，宿主按真实阶段（检查 AGENTS.md 形态 → 调用模型规划拆分 → 校验计划 → 写入主题文件与索引）上报进度，页面显示操作名、阶段说明、所用模型、超时与已等待时间，同时**刷新按钮和所有会改文件的按钮/输入框都禁用**；同一时刻只允许一个迁移在跑（另一个标签页或双击会被明确拒绝）。每个阶段也会写进 `<dshHome>/logs/persona-memory.log`（`admin: migrate <root> stage=...`），便于事后核对「处理中」是否真的在推进。失败/拒绝时页面保留卡片并给出可读原因，完成后显示新建主题文件数与 `.bak` 文件名。
 
 ### 管理页
 

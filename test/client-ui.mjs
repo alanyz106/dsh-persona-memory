@@ -129,8 +129,14 @@ function renderOnce(Component, hookState, seed = {}) {
     },
     useCallback(fn, deps) {
       const i = index++;
-      hookState[i] = { fn, deps };
-      return fn;
+      const prev = hookState[i];
+      const same = prev && prev.deps && deps
+        && prev.deps.length === deps.length && deps.every((d, j) => d === prev.deps[j]);
+      // React keeps the callback identity while deps are unchanged. Without
+      // this, the mount-load effect would re-fire on every render and its
+      // /status payload would overwrite an in-flight migration's real stage.
+      hookState[i] = same ? prev : { fn, deps };
+      return hookState[i].fn;
     },
   };
   const previous = React.__SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED.ReactCurrentDispatcher.current;
@@ -164,10 +170,12 @@ function visibleText(tree) {
 }
 
 const STATUS = {
-  dir: '/tmp/memory', which: 'dsh-only', config: {}, schema: [], backupDir: '/tmp/backup',
+  dir: '/tmp/memory', which: 'dsh-only',
+  config: { projectMigrateTimeoutMs: 600000 }, schema: [], backupDir: '/tmp/backup',
   backups: [], stores: {}, standing: { instructions: [], chars: 0 },
   indexes: {}, models: { dir: '', models: [] }, projects: [], entries: {},
-  llmRouteAvailable: true, migration: { active: false }, ts: Date.now(),
+  llmRouteAvailable: true, llmRoute: { provider: '9router', model: 'cbcn/hy4free' },
+  migration: { active: false }, ts: Date.now(),
 };
 const WITH_PROJECT = {
   ...STATUS,
@@ -224,6 +232,12 @@ check('idle page has an enabled 刷新 button',
 check('boot fetched /status through the same-origin route', calls.some((c) => c.name === '/status'));
 const migrateBtn = findButton(tree, '迁移旧 AGENTS.md');
 check('prose project exposes a migration button', !!migrateBtn, visibleText(tree).slice(0, 250));
+check('migration hint names the inherited default model and configurable timeout',
+  /使用 9router\/cbcn\/hy4free/.test(visibleText(tree)) && /规划超时 10 分钟/.test(visibleText(tree)),
+  visibleText(tree).slice(-350));
+check('migration tooltip names the route and timeout',
+  !!migrateBtn && /9router\/cbcn\/hy4free/.test(String(migrateBtn.props.title)) && /10 分钟/.test(String(migrateBtn.props.title)),
+  String(migrateBtn && migrateBtn.props.title));
 
 // Simulate a long migration: POST /projectMigrate never resolves, while the
 // status routes return a real host stage. Re-render must keep the refresh
