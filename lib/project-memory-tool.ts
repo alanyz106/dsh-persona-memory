@@ -93,11 +93,160 @@ function projectFor(exec: ToolRunContext, deps: ProjectMemoryDeps): { root: stri
   return { root, index: readIndex(root) };
 }
 
-function requireText(value: unknown, field: string): string {
-  if (typeof value !== 'string' || value.trim() === '') {
-    throw new HarnessError(`缺少必填参数 \`${field}\``, 'PROJECT_MISSING_ARGUMENT');
+/** Declared parameter names — anything else in `args` is a model mistake. */
+const DECLARED_PARAMS = ['action', 'file', 'summary', 'content', 'match', 'query', 'apply'] as const;
+type DeclaredParam = typeof DECLARED_PARAMS[number];
+
+/**
+ * Names a model reaches for instead of `file`.
+ *
+ * The harness's own `read`/`write`/`edit` tools all take `file_path`, so a
+ * model switching tools carries the name over. The parameter schema is open
+ * (only `action` is required), so nothing rejected it: the action then read
+ * `args.file` as `undefined` and reported `非法记忆文件名：undefined`, which
+ * names neither the offending key nor the fix.
+ */
+const FILE_ALIASES = ['file_path', 'path', 'filepath'] as const;
+
+/** Per-action arguments that must be non-empty strings, with a usage hint. */
+const ACTION_REQUIREMENTS: Readonly<Record<string, readonly { field: RequiredField; hint: string }[]>> = {
+  read: [{ field: 'file', hint: '形如 memory/build.md' }],
+  write: [
+    { field: 'file', hint: '形如 memory/build.md' },
+    { field: 'summary', hint: '写进 AGENTS.md 索引行的一句话摘要' },
+    { field: 'content', hint: '主题文件的完整正文' },
+  ],
+  append: [
+    { field: 'file', hint: '形如 memory/pitfalls.md' },
+    { field: 'content', hint: '要追加的小节，不会覆盖原文件' },
+  ],
+  delete: [{ field: 'file', hint: '形如 memory/build.md' }],
+  update: [
+    { field: 'match', hint: '要替换的那一行里的唯一子串' },
+    { field: 'content', hint: '替换后的新内容' },
+  ],
+  search: [{ field: 'query', hint: '空格分隔的检索词' }],
+  add_resident: [{ field: 'content', hint: '加入常驻区的规则行，一行一条' }],
+  remove_resident: [{ field: 'match', hint: '要删除的常驻行里的唯一子串' }],
+};
+
+type RequiredField = 'file' | 'summary' | 'content' | 'match' | 'query';
+/** Every string argument of one call; empty when the action does not need it. */
+type ActionArgs = Record<RequiredField, string>;
+
+/**
+ * Rewrite one call's arguments into the declared names, or reject it.
+ *
+ * @throws HarnessError when the call carries a parameter this tool does not have
+ */
+function normalizeArgs(raw: Record<string, unknown>, ctx: Context): Record<string, unknown> {
+  const args: Record<string, unknown> = { ...raw };
+  for (const alias of FILE_ALIASES) {
+    if (!Object.hasOwn(args, alias)) continue;
+    const aliased = args[alias];
+    delete args[alias];
+    if (typeof args.file === 'string' && args.file.trim() !== '') {
+      if (args.file !== aliased) {
+        ctx.logger.warn('[dsh-persona-memory] project_memory: 同时给了 `file` 和 `%s`，以 `file` 为准', alias);
+      }
+      continue;
+    }
+    args.file = aliased;
+    ctx.logger.warn('[dsh-persona-memory] project_memory: 参数 `%s` 按 `file` 处理（命名沿用自 fs 工具）', alias);
   }
-  return value;
+  const unknown = Object.keys(args).filter((key) => !DECLARED_PARAMS.includes(key as DeclaredParam));
+  if (unknown.length > 0) {
+    throw new HarnessError(
+      `project_memory 不认识参数 ${unknown.map((key) => `\`${key}\``).join('、')}；`
+      + `可用参数只有 ${DECLARED_PARAMS.join('/')}（文件名用 \`file\`，形如 memory/build.md）`,
+      'PROJECT_UNKNOWN_ARGUMENT',
+    );
+  }
+  if (typeof args.action !== 'string' || args.action.trim() === '') {
+    throw new HarnessError('project_memory 缺少必填参数 `action`', 'PROJECT_MISSING_ARGUMENT');
+  }
+  return args;
+}
+
+/**
+ * Validate the required arguments of one action before any filesystem work.
+ *
+ * The declared schema cannot express per-action dependencies (only `action` is
+ * required), so this is where a missing `file`/`content`/`match` is caught —
+ * with a message naming the field and its shape, instead of letting the action
+ * read `undefined` and fail later on a path gate.
+ *
+ * @returns every string argument, empty for the ones this action does not use
+ */
+function requireActionArgs(args: Record<string, unknown>, action: string): ActionArgs {
+  const req: ActionArgs = { file: '', summary: '', content: '', match: '', query: '' };
+  for (const { field, hint } of ACTION_REQUIREMENTS[action] ?? []) {
+    const value = args[field];
+    if (typeof value !== 'string' || value.trim() === '') {
+      throw new HarnessError(
+        `project_memory ${action} 缺少必填参数 \`${field}\`（${hint}）`,
+        'PROJECT_MISSING_ARGUMENT',
+      );
+    }
+    req[field] = value;
+  }
+  // `update` takes an optional `file` to choose the zone; every other action
+  // either requires it above or ignores it.
+  if (req.file === '' && typeof args.file === 'string') req.file = args.file;
+  return req;
+}
+
+/**
+ * Validate one `file` argument and explain a rejection in what the model
+ * actually passed.
+ *
+ * `safeMemoryRel` stays the only gate; this turns its `null` into a message
+ * that names the mistake — a body pasted into `file`, an absolute path, a
+ * non-markdown name, or AGENTS.md itself.
+ *
+ * @throws HarnessError when the value is not a legal project memory path
+ */
+function requireRel(root: string, value: unknown, action: string): string {
+  // A bare `AGENTS.md` is the one input `safeMemoryRel` rewrites into a
+  // plausible-looking-but-wrong path: the shorthand rule prepends `memory/`,
+  // so the call fails much later with `memory/AGENTS.md 不存在`. The model meant
+  // the resident zone, which no topic-file action can address.
+  if (typeof value === 'string' && !value.includes('/') && !value.includes('\\')
+    && value.trim().toLowerCase() === 'agents.md') {
+    throw new HarnessError(
+      `project_memory ${action}：\`AGENTS.md\` 是常驻区本身，不是 memory/ 下的主题文件。`
+      + '改常驻规则用 `update`（配 `match`+`content`）/`add_resident`/`remove_resident`；'
+      + '主题文件形如 `memory/build.md`',
+      'PROJECT_INVALID_FILE',
+    );
+  }
+  const rel = safeMemoryRel(root, value);
+  if (rel !== null) return rel;
+  throw new HarnessError(
+    `project_memory ${action}：${describeBadFile(value)}`,
+    'PROJECT_INVALID_FILE',
+  );
+}
+
+function describeBadFile(value: unknown): string {
+  if (typeof value !== 'string' || value.trim() === '') {
+    return '缺少必填参数 `file`（形如 memory/build.md）';
+  }
+  const raw = value.trim();
+  const slashed = raw.replace(/\\/g, '/');
+  if (raw.includes('\n') || raw.length > 200) {
+    return '`file` 看起来是正文而不是路径——正文放 `content`，`file` 只写 `memory/<主题>.md`';
+  }
+  if (/(^|\/)AGENTS\.md$/i.test(slashed)) {
+    return '`AGENTS.md` 是常驻区本身，不是主题文件：改常驻规则用 `update`/`add_resident`/`remove_resident`，主题文件形如 `memory/build.md`';
+  }
+  if (/^[A-Za-z]:/.test(raw) || slashed.startsWith('/') || raw.includes('..')) {
+    return `\`${raw}\` 必须是项目内的相对路径（不接受绝对路径与 \`..\`），形如 memory/build.md`;
+  }
+  if (!slashed.endsWith('.md')) {
+    return `\`${raw}\` 必须以 .md 结尾，形如 memory/build.md`;
+  }
+  return `\`${raw}\` 不在 memory/ 下或含有非法字符；只接受 memory/<主题>.md，或裸文件名 <主题>.md`;
 }
 
 function rejectBlocked(content: string, enabled: boolean): void {
@@ -186,7 +335,8 @@ export function registerProjectMemoryTool(ctx: Context, deps: ProjectMemoryDeps)
         },
         file: {
           type: 'string',
-          description: 'Topic file, e.g. `memory/build.md` or `build.md`. Required for read/write/append/update/delete.',
+          description: 'Topic file, e.g. `memory/build.md` or `build.md`. Required for read/write/append/update/delete. '
+            + 'The path always goes in `file` — this tool has no `file_path`.',
         },
         summary: {
           type: 'string',
@@ -194,7 +344,8 @@ export function registerProjectMemoryTool(ctx: Context, deps: ProjectMemoryDeps)
         },
         content: {
           type: 'string',
-          description: 'Full file content for write, appended section for append, replacement line(s) for update, rule line(s) for add_resident.',
+          description: 'Full file content for write, appended section for append, replacement line(s) for update, rule line(s) for add_resident. '
+            + 'Never put the path here.',
         },
         match: {
           type: 'string',
@@ -222,25 +373,32 @@ export function registerProjectMemoryTool(ctx: Context, deps: ProjectMemoryDeps)
         },
       },
       async execute(args, exec) {
+        // The declared schema only marks `action` required, so argument
+        // hygiene is this tool's job: map the fs-style `file_path` spelling,
+        // reject undeclared keys, and enforce each action's own requirements
+        // before anything touches the filesystem.
+        const normalized = normalizeArgs(args as unknown as Record<string, unknown>, ctx);
+        const action = normalized.action as string;
+        const req = requireActionArgs(normalized, action);
+
         // `guide` is pure documentation: it must work outside a project too
         // (a session in the home directory still needs to know how to write
         // memory), and it must not enroll the cwd in the registry — the admin
         // page lists projects that keep memory, not projects that were asked
         // about it.
-        if (args.action === 'guide') {
+        if (action === 'guide') {
           return { guide: projectGuideText() } as unknown as Record<string, JsonValue>;
         }
         const { root, index } = projectFor(exec, deps);
         registerProject(cfg.memoryDir, root);
         const route = resolveLlmRoute(ctx, exec.agent?.session ? latestRoute(exec.agent.session) : undefined);
 
-        switch (args.action) {
+        switch (action) {
           case 'list':
             return describe(root, index, cfg) as unknown as Record<string, JsonValue>;
 
           case 'read': {
-            const rel = safeMemoryRel(root, args.file);
-            if (!rel) throw new HarnessError(`非法记忆文件名：${String(args.file)}`, 'PROJECT_INVALID_FILE');
+            const rel = requireRel(root, req.file, 'read');
             const content = readMemoryFile(root, rel);
             if (content === null) {
               return { file: rel, exists: false } as unknown as Record<string, JsonValue>;
@@ -249,10 +407,9 @@ export function registerProjectMemoryTool(ctx: Context, deps: ProjectMemoryDeps)
           }
 
           case 'write': {
-            const rel = safeMemoryRel(root, args.file);
-            if (!rel) throw new HarnessError(`非法记忆文件名：${String(args.file)}`, 'PROJECT_INVALID_FILE');
-            const summary = requireText(args.summary, 'summary').trim();
-            const content = requireText(args.content, 'content');
+            const rel = requireRel(root, req.file, 'write');
+            const summary = req.summary.trim();
+            const content = req.content;
             rejectBlocked(content, cfg.enableSecretScanning);
             rejectBlocked(summary, cfg.enableSecretScanning);
             await autoMigrate(root, index, route);
@@ -271,14 +428,13 @@ export function registerProjectMemoryTool(ctx: Context, deps: ProjectMemoryDeps)
           }
 
           case 'append': {
-            const rel = safeMemoryRel(root, args.file);
-            if (!rel) throw new HarnessError(`非法记忆文件名：${String(args.file)}`, 'PROJECT_INVALID_FILE');
-            const content = requireText(args.content, 'content');
+            const rel = requireRel(root, req.file, 'append');
+            const content = req.content;
             rejectBlocked(content, cfg.enableSecretScanning);
             await autoMigrate(root, index, route);
             const appended = await appendMemoryFile(root, rel, content, cfg.projectFileCharLimit);
             if (!appended.ok) throw new HarnessError(appended.error, 'PROJECT_WRITE_FAILED');
-            const summary = typeof args.summary === 'string' ? args.summary.trim() : '';
+            const summary = typeof normalized.summary === 'string' ? normalized.summary.trim() : '';
             const existing = readIndex(root).entries.find((e) => e.file === rel);
             if (!existing || (summary && summary !== existing.summary)) {
               const indexed = await upsertIndex(root, rel, summary || existing?.summary || '', budget);
@@ -293,13 +449,12 @@ export function registerProjectMemoryTool(ctx: Context, deps: ProjectMemoryDeps)
             // One action for both zones: with `file` it edits a line inside a
             // topic file; without it, a resident AGENTS.md rule. This replaces
             // the remove_resident + add_resident two-step for stale rules.
-            const match = requireText(args.match, 'match');
-            const content = requireText(args.content, 'content');
+            const match = req.match;
+            const content = req.content;
             rejectBlocked(content, cfg.enableSecretScanning);
             await autoMigrate(root, index, route);
-            if (typeof args.file === 'string' && args.file.trim() !== '') {
-              const rel = safeMemoryRel(root, args.file);
-              if (!rel) throw new HarnessError(`非法记忆文件名：${args.file}`, 'PROJECT_INVALID_FILE');
+            if (req.file !== '') {
+              const rel = requireRel(root, req.file, 'update');
               const updated = await updateMemoryFile(root, rel, match, content, cfg.projectFileCharLimit);
               if (!updated.ok) throw new HarnessError(updated.error, 'PROJECT_UPDATE_FAILED');
               deps.onWrite?.(root);
@@ -315,7 +470,13 @@ export function registerProjectMemoryTool(ctx: Context, deps: ProjectMemoryDeps)
                 }
                 return line;
               });
-              if (replaced === 0) return { error: `没有匹配「${match}」的常驻行` };
+              if (replaced === 0) {
+                return {
+                  error: `没有匹配「${match}」的常驻行。`
+                    + '`update` 没给 `file` 时只改 AGENTS.md 常驻区；'
+                    + '要改主题文件请带上 `file`（如 memory/pitfalls.md），要新增主题文件用 `write`',
+                };
+              }
               return { resident: next, entries };
             }, budget);
             if (!result.ok) throw new HarnessError(result.error, 'PROJECT_RESIDENT_UPDATE_FAILED');
@@ -325,8 +486,7 @@ export function registerProjectMemoryTool(ctx: Context, deps: ProjectMemoryDeps)
           }
 
           case 'delete': {
-            const rel = safeMemoryRel(root, args.file);
-            if (!rel) throw new HarnessError(`非法记忆文件名：${String(args.file)}`, 'PROJECT_INVALID_FILE');
+            const rel = requireRel(root, req.file, 'delete');
             const removed = await deleteMemoryFile(root, rel);
             const cleared = await mutateIndex(root, ({ resident, entries }) => ({
               resident,
@@ -344,13 +504,13 @@ export function registerProjectMemoryTool(ctx: Context, deps: ProjectMemoryDeps)
           }
 
           case 'search': {
-            const query = requireText(args.query, 'query');
+            const query = req.query;
             const hits = searchMemoryFiles(root, query, cfg.searchMaxResults);
             return { query, matchCount: hits.length, hits } as unknown as Record<string, JsonValue>;
           }
 
           case 'add_resident': {
-            const content = requireText(args.content, 'content');
+            const content = req.content;
             rejectBlocked(content, cfg.enableSecretScanning);
             const lines = content.split('\n').map((l) => l.replace(/\s+$/, '')).filter((l) => l.trim() !== '');
             const result = await mutateIndex(root, ({ resident, entries }) => {
@@ -370,7 +530,7 @@ export function registerProjectMemoryTool(ctx: Context, deps: ProjectMemoryDeps)
           }
 
           case 'remove_resident': {
-            const match = requireText(args.match, 'match').toLowerCase();
+            const match = req.match.toLowerCase();
             let removed = 0;
             const result = await mutateIndex(root, ({ resident, entries }) => {
               const next = resident.filter((line) => {
@@ -380,7 +540,7 @@ export function registerProjectMemoryTool(ctx: Context, deps: ProjectMemoryDeps)
                 }
                 return true;
               });
-              if (removed === 0) return { error: `没有匹配「${args.match}」的常驻行` };
+              if (removed === 0) return { error: `没有匹配「${req.match}」的常驻行` };
               return { resident: next, entries };
             }, budget);
             if (!result.ok) throw new HarnessError(result.error, 'PROJECT_RESIDENT_NOT_FOUND');
@@ -391,7 +551,7 @@ export function registerProjectMemoryTool(ctx: Context, deps: ProjectMemoryDeps)
 
           case 'migrate': {
             const result = await migrateAgents(ctx, root, route, {
-              apply: args.apply === true,
+              apply: normalized.apply === true,
               scan: cfg.enableSecretScanning,
               fileCharLimit: cfg.projectFileCharLimit,
               residentCharLimit: cfg.projectResidentCharLimit,
@@ -406,7 +566,7 @@ export function registerProjectMemoryTool(ctx: Context, deps: ProjectMemoryDeps)
           }
 
           default:
-            throw new HarnessError(`未知 action "${String(args.action)}"`, 'PROJECT_INVALID_ACTION');
+            throw new HarnessError(`未知 action "${action}"`, 'PROJECT_INVALID_ACTION');
         }
       },
     }),

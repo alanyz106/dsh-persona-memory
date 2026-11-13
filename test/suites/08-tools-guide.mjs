@@ -108,6 +108,77 @@ const blockedWrite = await projTool.execute(
 ).catch((e) => e);
 check('project_memory rejects secrets', blockedWrite instanceof Error);
 
+// 15d. argument hygiene: the failure modes seen in real transcripts.
+// (a) key order is irrelevant — JSON args are a name->value map, not positional
+const reordered = await projTool.execute(
+  { content: '## 顺序无关\n内容在前', file: 'memory/reorder.md', summary: '键序', action: 'write' },
+  execStub,
+).catch((e) => e);
+check('project_memory ignores argument key order',
+  reordered?.file === 'memory/reorder.md' && readMemoryFile(toolProjRoot, 'memory/reorder.md').includes('顺序无关'),
+  JSON.stringify(reordered));
+await projTool.execute({ action: 'delete', file: 'memory/reorder.md' }, execStub);
+
+// (b) `file_path` is accepted as `file` (the fs tools' spelling)
+const aliased = await projTool.execute(
+  { action: 'append', file_path: 'memory/build.md', content: '## alias\nfile_path 也能用' },
+  execStub,
+).catch((e) => e);
+check('project_memory accepts file_path as file',
+  aliased?.file === 'memory/build.md' && readMemoryFile(toolProjRoot, 'memory/build.md').includes('file_path 也能用'),
+  JSON.stringify(aliased));
+
+// (c) a genuinely unknown key is rejected, and the message names the legal set
+const unknownKey = await projTool.execute(
+  { action: 'append', file: 'memory/build.md', text: 'x' },
+  execStub,
+).catch((e) => e);
+check('project_memory rejects an undeclared parameter',
+  unknownKey instanceof Error && /`text`/.test(unknownKey.message) && /可用参数只有/.test(unknownKey.message),
+  unknownKey instanceof Error ? unknownKey.message : String(unknownKey));
+
+// (d) a missing `file` names the field instead of reporting an undefined path
+const missingFile = await projTool.execute({ action: 'append', content: 'x' }, execStub).catch((e) => e);
+check('project_memory names a missing file argument',
+  missingFile instanceof Error
+    && /缺少必填参数 `file`/.test(missingFile.message)
+    && /memory\/pitfalls\.md/.test(missingFile.message)
+    && !/非法记忆文件名/.test(missingFile.message),
+  missingFile instanceof Error ? missingFile.message : String(missingFile));
+
+// (e) write validates summary/content before touching the filesystem
+const missingSummary = await projTool.execute({ action: 'write', file: 'memory/nosummary.md', content: 'x' }, execStub).catch((e) => e);
+check('project_memory names a missing summary argument',
+  missingSummary instanceof Error && /缺少必填参数 `summary`/.test(missingSummary.message),
+  missingSummary instanceof Error ? missingSummary.message : String(missingSummary));
+check('a rejected write leaves no file behind', !fs.existsSync(path.join(toolProjRoot, 'memory', 'nosummary.md')));
+
+// (f) a body pasted into `file` is diagnosed as such
+const bodyInFile = await projTool.execute(
+  { action: 'append', file: '# 一段正文\n第二行', content: 'x' },
+  execStub,
+).catch((e) => e);
+check('project_memory spots content pasted into file',
+  bodyInFile instanceof Error && /看起来是正文/.test(bodyInFile.message),
+  bodyInFile instanceof Error ? bodyInFile.message : String(bodyInFile));
+
+// (g) AGENTS.md is the resident zone, not a topic file
+const agentsAsFile = await projTool.execute(
+  { action: 'update', file: 'AGENTS.md', match: 'x', content: 'y' },
+  execStub,
+).catch((e) => e);
+check('project_memory explains that AGENTS.md is not a topic file',
+  agentsAsFile instanceof Error
+    && /常驻区/.test(agentsAsFile.message)
+    && !/memory\/AGENTS\.md 不存在/.test(agentsAsFile.message),
+  agentsAsFile instanceof Error ? agentsAsFile.message : String(agentsAsFile));
+
+// (h) resident update miss points at the missing `file` for topic files
+const residentMissHint = await projTool.execute({ action: 'update', match: '绝不存在的行', content: 'x' }, execStub).catch((e) => e);
+check('resident update miss suggests passing file',
+  residentMissHint instanceof Error && /要改主题文件请带上 `file`/.test(residentMissHint.message),
+  residentMissHint instanceof Error ? residentMissHint.message : String(residentMissHint));
+
 // 15c. authoring guide: one source of truth, two sizes
 const guideText = projectGuideText();
 const coreLines = projectCoreLines();
