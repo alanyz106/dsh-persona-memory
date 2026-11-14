@@ -323,7 +323,7 @@ check('admin exposes the project route family', ['projectRead', 'projectWrite', 
     Object.keys(payload.entries).sort().join(',') === 'memory,user' && !('failure' in payload.stores),
     JSON.stringify(Object.keys(payload.entries)));
   const entries = payload.entries.memory || [];
-  check('entries carry creation and reference dates',
+  check('entries carry creation dates (last stays on disk but the page ignores it)',
     entries.length === 3 && entries[0].created === '2020-01-01' && entries[0].lastReferenced === '2020-01-02',
     JSON.stringify(entries.map((e) => [e.created, e.lastReferenced])));
 

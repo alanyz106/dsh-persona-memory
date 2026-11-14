@@ -26,7 +26,7 @@ import type { EmbeddingProvider } from './embedding.js';
 
 const WHICHES: MemoryKind[] = ['memory', 'user'];
 /** Bumped when the indexed store set or schema changes; a mismatch clears the derived rows. */
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 export interface VectorSearchHit {
   which: string;
@@ -61,17 +61,6 @@ export function createVectorIndex(config: VectorIndexConfig): VectorIndex {
       db = new DatabaseSync(dbPath);
       db.exec(`
         PRAGMA journal_mode = WAL;
-        CREATE TABLE IF NOT EXISTS entries (
-          id        INTEGER PRIMARY KEY,
-          which     TEXT NOT NULL,
-          text_hash TEXT NOT NULL,
-          text      TEXT NOT NULL,
-          embedding BLOB NOT NULL,
-          created   TEXT NOT NULL,
-          last      TEXT NOT NULL,
-          UNIQUE (which, text_hash)
-        );
-        CREATE INDEX IF NOT EXISTS idx_entries_which ON entries (which);
         CREATE TABLE IF NOT EXISTS meta (
           key   TEXT PRIMARY KEY,
           value TEXT NOT NULL
@@ -79,10 +68,23 @@ export function createVectorIndex(config: VectorIndexConfig): VectorIndex {
       `);
       const row = db.prepare('SELECT value FROM meta WHERE key = ?').get('schema_version') as { value?: unknown } | undefined;
       if (row && Number(row.value) !== SCHEMA_VERSION) {
-        // Schema changed: drop derived data and rebuild lazily on next search.
-        db.exec('DELETE FROM entries;');
-        db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run('schema_version', String(SCHEMA_VERSION));
-      } else if (!row) {
+        // Schema changed: the derived table is disposable, so drop it and let
+        // the next search rebuild from the Markdown files.
+        db.exec('DROP TABLE IF EXISTS entries;');
+      }
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS entries (
+          id        INTEGER PRIMARY KEY,
+          which     TEXT NOT NULL,
+          text_hash TEXT NOT NULL,
+          text      TEXT NOT NULL,
+          embedding BLOB NOT NULL,
+          created   TEXT NOT NULL,
+          UNIQUE (which, text_hash)
+        );
+        CREATE INDEX IF NOT EXISTS idx_entries_which ON entries (which);
+      `);
+      if (!row || Number(row.value) !== SCHEMA_VERSION) {
         db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run('schema_version', String(SCHEMA_VERSION));
       }
       return db;
@@ -125,12 +127,12 @@ export function createVectorIndex(config: VectorIndexConfig): VectorIndex {
           const texts = missing.map((m) => decodeEntry(m.raw).text);
           const vectors = await config.provider!.embed(texts);
           const insert = handle.prepare(
-            'INSERT OR REPLACE INTO entries (which, text_hash, text, embedding, created, last) VALUES (?, ?, ?, ?, ?, ?)',
+            'INSERT OR REPLACE INTO entries (which, text_hash, text, embedding, created) VALUES (?, ?, ?, ?, ?)',
           );
           for (let i = 0; i < missing.length; i++) {
             const dec = decodeEntry(missing[i].raw);
             const buf = Buffer.from(Float32Array.from(vectors[i]).buffer);
-            insert.run(which, missing[i].hash, dec.text, buf, dec.created, dec.lastReferenced);
+            insert.run(which, missing[i].hash, dec.text, buf, dec.created);
           }
         }
         return true;

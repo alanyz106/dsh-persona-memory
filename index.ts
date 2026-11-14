@@ -71,7 +71,6 @@ export interface PluginConfig {
   /** 该摘要的字符预算（常驻区 + @memory 索引行）。 */
   learnProjectContextCharLimit: number;
   autoConsolidate: boolean;
-  consolidateStaleDays: number;
   consolidateTimeoutMs: number;
   standingEnabled: boolean;
   standingCharLimit: number;
@@ -280,7 +279,6 @@ export function apply(ctx: Context, config?: Record<string, unknown>): void {
     // auto-consolidation when a store exceeds its char limit (LLM merge,
     // committed only when strictly smaller and scanner-clean)
     autoConsolidate: true,
-    consolidateStaleDays: 30,
     consolidateTimeoutMs: 120000,
     // standing instructions (STANDING.md, always injected, user-authored only)
     standingEnabled: true,
@@ -513,7 +511,7 @@ export function apply(ctx: Context, config?: Record<string, unknown>): void {
       return [
         '## Persistent persona memory',
         'You have a persistent long-term memory stored on disk that survives across sessions, shared with your other agent instances. It is managed through the `memory` tool and searched with `memory_search`.',
-        'Keep it current: record durable facts about the user, their preferences, conventions, environment details, and cross-project lessons; update or delete entries when they change. Repository-specific knowledge belongs in that repository\'s project memory (`project_memory`), and the user\'s own always-on rules live in STANDING.md (user-authored via `/standing`). Never store credentials — writes are scanned and rejected.',
+        'Keep it current: record durable facts about the user, their preferences, conventions, environment details, and cross-project lessons; update or delete entries when they change. When the user corrects you, add the entry with the text starting with `用户纠正：` (keep the date in the text). Repository-specific knowledge belongs in that repository\'s project memory (`project_memory`), and the user\'s own always-on rules live in STANDING.md (user-authored via `/standing`). Never store credentials — writes are scanned and rejected.',
         'Current memory:',
         renderMemoryBlock(store, cfg),
       ].join('\n\n');

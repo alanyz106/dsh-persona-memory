@@ -74,6 +74,8 @@ export function registerMemoryTool(
         'A lesson that only makes sense in THIS repository (its build, deploy, architecture, a bug ' +
         'specific to this codebase) does NOT go here: record it in this repository\'s project memory ' +
         'via `project_memory` (a `memory/pitfalls.md` topic and/or a resident rule). ' +
+        'When the user corrects you, add the entry with the text starting with `用户纠正：` ' +
+        '(keep the date in the text) — consolidation never merges those away. ' +
         'Actions: read (show current memory), add (append one entry), update (replace an entry ' +
         'whose text contains `match`), delete (remove an entry whose text contains `match`), ' +
         'rewrite (replace the whole file — use for consolidation). Entries are free-form single-line ' +

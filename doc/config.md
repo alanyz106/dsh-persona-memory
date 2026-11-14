@@ -45,7 +45,6 @@
 | `learnProjectContext` | `true` | 把项目记忆摘要一并给学习模型做「已存在则跳过」判断 |
 | `learnProjectContextCharLimit` | `1500` | 上述摘要的字符预算 |
 | `autoConsolidate` | `true` | 超限时自动 LLM 合并（严格更小才提交） |
-| `consolidateStaleDays` | `30` | 合并时判定"陈旧可删"的天数 |
 | `consolidateTimeoutMs` | `120000` | 合并 LLM 调用超时 |
 
 ## 常驻指令

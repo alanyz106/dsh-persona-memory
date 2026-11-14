@@ -10,7 +10,7 @@ import { withUsage } from '../../dist/lib/memory-tool.js';
 import { parseFacts } from '../../dist/lib/learning.js';
 import { createStandingStore, parseInstructions, normalizeInstruction } from '../../dist/lib/standing.js';
 import { registerStandingCommand } from '../../dist/lib/standing-command.js';
-import { parseConsolidatedOutput, validateConsolidation, buildConsolidationPrompt } from '../../dist/lib/consolidate.js';
+import { parseConsolidatedOutput, validateConsolidation, buildConsolidationPrompt, attachMetadata } from '../../dist/lib/consolidate.js';
 import { check, testDir } from '../harness.mjs';
 
 // 5. scanner
@@ -96,7 +96,7 @@ check('standing file round-trip via hermes-style lines', (await reloaded.snapsho
 // 10. auto-consolidation (parse + safety gate)
 const goodReply = [
   '```json',
-  '{"entries": ["merged fact <!-- created=2026-08-01, last=2026-08-13 -->", "kept fact <!-- created=2026-08-02, last=2026-08-13 -->"]}',
+  '{"entries": ["merged fact <!-- created=2026-08-01 -->", "kept fact <!-- created=2026-08-02 -->"]}',
   '```',
 ].join('\n');
 const consolidated = parseConsolidatedOutput(goodReply);
@@ -104,17 +104,26 @@ check('consolidate parses JSON with fences', consolidated !== null && consolidat
 check('consolidate rejects malformed', parseConsolidatedOutput('sorry no json here') === null);
 check('consolidate rejects empty entries', parseConsolidatedOutput('{"entries": []}') === null);
 
-const currentRaw = ['long entry one with lots of padding <!-- created=2026-01-01, last=2026-01-02 -->', 'long entry two with lots of padding too <!-- created=2026-01-01, last=2026-01-02 -->'];
-const smaller = ['merged concise fact <!-- created=2026-01-01, last=2026-08-13 -->'];
+const currentRaw = ['long entry one with lots of padding <!-- created=2026-01-01 -->', 'long entry two with lots of padding too <!-- created=2026-01-01 -->'];
+const smaller = ['merged concise fact <!-- created=2026-01-01 -->'];
 const v1 = validateConsolidation(currentRaw, smaller, { enableSecretScanning: true });
 check('consolidate commits only when strictly smaller', v1.ok === true && v1.chars < currentRaw.join('\n§\n').length, JSON.stringify(v1));
-const v2 = validateConsolidation(currentRaw, ['a big entry that is definitely way longer than both current entries put together forever and then some more padding to push it well past the combined size of the originals <!-- created=2026-01-01, last=2026-08-13 -->'], { enableSecretScanning: true });
+const v2 = validateConsolidation(currentRaw, ['a big entry that is definitely way longer than both current entries put together forever and then some more padding to push it well past the combined size of the originals <!-- created=2026-01-01 -->'], { enableSecretScanning: true });
 check('consolidate rejects not-smaller', v2.ok === false && /not-smaller/.test(v2.reason));
-const v3 = validateConsolidation(currentRaw, ['secret sk-abcDEF0123456789abcdef0123456789 leaked <!-- created=2026-01-01, last=2026-08-13 -->'], { enableSecretScanning: true });
+const v3 = validateConsolidation(currentRaw, ['secret sk-abcDEF0123456789abcdef0123456789 leaked <!-- created=2026-01-01 -->'], { enableSecretScanning: true });
 check('consolidate rejects scanner-blocked entry', v3.ok === false && /blocked/.test(v3.reason));
 const v4 = validateConsolidation(currentRaw, null, { enableSecretScanning: true });
 check('consolidate rejects null output', v4.ok === false);
-check('consolidate prompt mentions limit and stale days', /Character limit: 5000/.test(buildConsolidationPrompt(['x <!-- created=2026-01-01, last=2026-01-01 -->'], 5000, 30)));
+const consolidationPromptSample = buildConsolidationPrompt(['plain entry text'], 5000);
+check('consolidate prompt carries the budget and entry text but no dates or tags',
+  /Character limit: 5000/.test(consolidationPromptSample) &&
+  consolidationPromptSample.includes('plain entry text') &&
+  !/Stale threshold|Today's date|created=|last=/i.test(consolidationPromptSample));
+const metaRaw = ['a <!-- created=2020-01-01, last=2020-02-01 -->', 'b <!-- created=2021-01-01, last=2021-02-01 -->'];
+const metaOut = attachMetadata(['a', 'merged text'], metaRaw, '2026-11-14');
+check('consolidation keeps unchanged source lines and stamps merges with today',
+  metaOut[0] === metaRaw[0] && metaOut[1] === 'merged text <!-- created=2026-11-14, last=2026-11-14 -->',
+  JSON.stringify(metaOut));
 
 // 6b. /standing must declare free-form input, or picking it from the menu runs
 // it bare and the user can never type `add <text>` (Web composer contract).

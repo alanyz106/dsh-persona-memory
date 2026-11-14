@@ -22,7 +22,6 @@ import * as React from 'react';
 interface EntryItem {
   text: string;
   created: string;
-  lastReferenced: string;
   project: string | null;
 }
 
@@ -906,7 +905,7 @@ function MemAdminPage(): React.ReactElement {
         React.createElement('div', { style: { flex: 1, minWidth: 0 } },
           React.createElement('div', { style: { fontSize: 13, lineHeight: 1.5, whiteSpace: 'pre-wrap', wordBreak: 'break-word' } }, entry.text),
           React.createElement('div', { style: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)', marginTop: 3 } },
-            `创建 ${entry.created || '-'} · 最近引用 ${entry.lastReferenced || '-'}`,
+            `创建 ${entry.created || '-'}`,
           ),
         ),
         React.createElement('div', { style: { display: 'flex', gap: 6, flexShrink: 0 } },

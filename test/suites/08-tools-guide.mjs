@@ -28,7 +28,6 @@ registerMemoryTool(toolCtx, globalStore, {
   enableSecretScanning: true,
   usageNudgeThreshold: 0.9,
   autoConsolidate: false,
-  consolidateStaleDays: 30,
   consolidateTimeoutMs: 1000,
 });
 await globalStore.add('memory', 'TOOL-GLOBAL-CONVENTION use pnpm');

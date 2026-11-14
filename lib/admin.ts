@@ -346,17 +346,17 @@ function queryParam(url: URL, name: string): string | undefined {
   return value === null ? undefined : value;
 }
 
-/** today as YYYY-MM-DD (hermes date format). */
-function today(): string {
-  return new Date().toISOString().split('T')[0];
-}
-
 /** Encode one entry line (hermes MemoryStore.encodeEntry). */
 function encodeEntry(text: string, created: string, lastReferenced: string, project?: string | null): string {
   const projectMetadata = project?.trim()
     ? `, project64=${Buffer.from(project.trim(), 'utf-8').toString('base64url')}`
     : '';
   return `${text} <!-- created=${created}, last=${lastReferenced}${projectMetadata} -->`;
+}
+
+/** today as YYYY-MM-DD (hermes date format). */
+function today(): string {
+  return new Date().toISOString().split('T')[0];
 }
 
 /** Read raw file text or null when absent. */
@@ -419,7 +419,6 @@ export const CFG_SCHEMA: SchemaField[] = [
   { key: 'learnProjectContext', type: 'bool', label: '学习时附带项目摘要', group: '学习', help: '把当前项目记忆摘要（常驻区+@memory 索引）传给学习模型，用于跳过已在项目记忆里的事实；项目知识本身不写全局' },
   { key: 'learnProjectContextCharLimit', type: 'number', label: '项目摘要字符预算', group: '学习', help: '超出截断并标记 (truncated)' },
   { key: 'autoConsolidate', type: 'bool', label: '自动合并', group: '合并', help: '超限用 LLM 合并精简' },
-  { key: 'consolidateStaleDays', type: 'number', label: '合并陈旧天数', group: '合并' },
   { key: 'consolidateTimeoutMs', type: 'number', label: '合并超时（ms）', group: '合并' },
   { key: 'standingEnabled', type: 'bool', label: '常驻指令注入', group: '常驻' },
   { key: 'standingCharLimit', type: 'number', label: '常驻字符预算', group: '常驻' },
@@ -456,7 +455,7 @@ export const CFG_DEFAULTS: Record<string, unknown> = {
   learnHumanOnly: true, learnIntervalTurns: 10,
   learnRecentTurns: 2, learnMaxChars: 6000,
   learnTimeoutMs: 120000, learnProjectContext: true, learnProjectContextCharLimit: 1500,
-  autoConsolidate: true, consolidateStaleDays: 30, consolidateTimeoutMs: 120000,
+  autoConsolidate: true, consolidateTimeoutMs: 120000,
   standingEnabled: true, standingCharLimit: 2000, standingMaxEntries: 20,
   projectEnabled: true, projectFileCharLimit: 20000, projectResidentCharLimit: 6000,
   projectIndexCharLimit: 4000, projectAutoMigrate: true, projectMigrateTimeoutMs: 1200000, projectBootstrapHint: true,
@@ -1103,7 +1102,7 @@ export function makeAdminRoutes(deps: AdminRouteDeps): WebRoute[] {
     const current = parseEntries(raw).map(decodeEntry);
     const outcome = change(current);
     if (outcome.error) return { ok: false, error: outcome.error };
-    const next = outcome.next!.map((e) => encodeEntry(e.text, e.created, e.lastReferenced));
+    const next = outcome.next!.map((e) => encodeEntry(e.text, e.created, e.lastReferenced, e.project));
     const limit = which === 'user' ? cfgNum(cfg, 'userCharLimit', 5000) : cfgNum(cfg, 'memoryCharLimit', 5000);
     const charCount = next.length ? next.join(ENTRY_DELIMITER).length : 0;
     if (charCount > limit) return { ok: false, error: `容量超限（${charCount} > ${limit}），请先合并或精简` };

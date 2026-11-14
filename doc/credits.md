@@ -22,7 +22,7 @@
 |---|---|---|
 | 后台学习 | hermes 每 10 轮复习 | DSH `session/event` 钩子 + `ctx.llm.stream` + 自写提示词 |
 | 自动合并 | hermes `auto-consolidate.ts` | 超限触发、合并规则、**严格更小才提交**安全护栏 |
-| 记忆老化 | hermes Memory Aging | `created/last` 日期驱动合并决策 |
+| 记忆合并 | hermes `auto-consolidate.ts` | 超限时同主题合并；**不按时间淘汰**（hermes 的 aging 语义未沿用） |
 
 ## 4. DSH 原生（未借鉴 hermes，基于 DSH API 构建）
 

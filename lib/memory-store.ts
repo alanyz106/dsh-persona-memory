@@ -15,7 +15,11 @@
  * - Entries are joined by "\n§\n" (ENTRY_DELIMITER); each entry is a single
  *   line whose metadata lives in a trailing HTML comment (invisible in
  *   markdown, transparent to the delimiter).
- * - Legacy entries without the comment are accepted (dates default to today).
+ * - `last` is kept only for byte-compatibility with pi-hermes-memory: it is a
+ *   rewrite date, not a reference counter, so it is never injected into a
+ *   prompt, never shown in the admin page, and never used to decide what to
+ *   merge or prune.
+ * - Entries without a comment default both dates to today.
  * - Writes are atomic (temp file + rename) and serialized per file so
  *   parallel tool calls cannot lose each other's updates.
  */
@@ -41,6 +45,7 @@ export type MemoryKind = 'memory' | 'user';
 export interface DecodedEntry {
   text: string;
   created: string;
+  /** rewrite date kept for hermes compatibility; never used as a signal */
   lastReferenced: string;
   project: string | null;
 }
@@ -124,7 +129,7 @@ function today(): string {
 /**
  * Encode one entry line (hermes MemoryStore.encodeEntry).
  */
-function encodeEntry(text: string, created: string, lastReferenced: string, project?: string | null): string {
+export function encodeEntry(text: string, created: string, lastReferenced: string, project?: string | null): string {
   const projectMetadata = project?.trim()
     ? `, project64=${Buffer.from(project.trim(), 'utf-8').toString('base64url')}`
     : '';
@@ -133,19 +138,32 @@ function encodeEntry(text: string, created: string, lastReferenced: string, proj
 
 /**
  * Decode one raw entry line (hermes MemoryStore.decodeEntry).
+ *
+ * The trailing comment is parsed field-by-field so unknown fields are ignored;
+ * a missing `last` falls back to `created` (the tag is bookkeeping only).
  */
 export function decodeEntry(raw: string): DecodedEntry {
-  const match = /^(.*?)\s*<!--\s*created=([^,]+),\s*last=([^,>]+)(?:,\s*project64=([A-Za-z0-9_-]+))?\s*-->\s*$/.exec(raw);
+  const match = /^(.*?)\s*<!--\s*([^>]*?)\s*-->\s*$/s.exec(raw);
   if (match) {
-    let project: string | null = null;
-    if (match[4]) {
-      try {
-        project = Buffer.from(match[4], 'base64url').toString('utf-8').trim() || null;
-      } catch {
-        project = null;
-      }
+    const fields = new Map<string, string>();
+    for (const part of match[2].split(',')) {
+      const eq = part.indexOf('=');
+      if (eq > 0) fields.set(part.slice(0, eq).trim(), part.slice(eq + 1).trim());
     }
-    return { text: match[1].trim(), created: match[2].trim(), lastReferenced: match[3].trim(), project };
+    const created = fields.get('created');
+    if (created) {
+      let project: string | null = null;
+      const encoded = fields.get('project64');
+      if (encoded) {
+        try {
+          project = Buffer.from(encoded, 'base64url').toString('utf-8').trim() || null;
+        } catch {
+          project = null;
+        }
+      }
+      const lastReferenced = fields.get('last') ?? created;
+      return { text: match[1].trim(), created, lastReferenced, project };
+    }
   }
   const t = today();
   return { text: raw.trim(), created: t, lastReferenced: t, project: null };
@@ -428,7 +446,11 @@ export function createMemoryStore(config: MemoryStoreConfig): MemoryStore {
     const entries = trimmed.includes(ENTRY_DELIMITER)
       // "a\n§\nb" — real multi-entry document: at least one separator present.
       // A leading/bare "§" without "\n§\n" stays a single entry.
-      ? parseEntries(trimmed)
+      ? parseEntries(trimmed).map((raw) => {
+          // Re-encode so malformed/absent metadata is normalized.
+          const decodedEntry = decodeEntry(raw);
+          return encodeEntry(decodedEntry.text, decodedEntry.created, decodedEntry.lastReferenced, decodedEntry.project);
+        })
       : [encodeEntry(normalizeContent(trimmed), today(), today())];
     const limit = charLimitFor(which);
     if (charCount(entries) > limit) {

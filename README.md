@@ -59,7 +59,7 @@
 
 ## 能力速查
 
-**存储**：跨会话持久化、每请求注入、项目记忆随仓库提交/回滚、记忆老化（`created/last`）。
+**存储**：跨会话持久化、每请求注入、项目记忆随仓库提交/回滚、超限按主题合并（`created` 仅作记录）。
 
 **工具**：`memory`（全局读写）、`memory_search`（FTS5 + 可选向量 RRF）、`project_memory`（12 个 action）、`/standing`。
 

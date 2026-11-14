@@ -50,6 +50,10 @@ const rw = await store.rewrite('memory', doc);
 check('rewrite parses hermes doc', rw.entryCount === 2, `entries=${rw.entryCount}`);
 const back = await store.read('memory', 5000);
 check('rewrite round-trip readable', back.entryCount === 2 && back.content.includes('fact one'));
+const rawAfterRw = await store.readRawSync('memory');
+check('rewrite keeps created/last metadata intact',
+  rawAfterRw.includes('fact one <!-- created=2026-01-01, last=2026-01-01 -->'),
+  JSON.stringify(rawAfterRw));
 
 // 4b. rewrite with PLAIN content containing a stray delimiter glyph must stay
 // ONE entry (regression: detection looked for the glyph anywhere, so ordinary
