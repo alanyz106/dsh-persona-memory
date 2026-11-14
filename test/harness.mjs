@@ -33,7 +33,7 @@ if (hasRealFiles) {
  * Tests exercise format/round-trip behavior, not capacity — generous limits so
  * a copied real hermes file never trips the overflow refusal mid-suite.
  */
-export const BIG_LIMITS = { memory: 1_000_000, user: 1_000_000, failure: 2_000_000 };
+export const BIG_LIMITS = { memory: 1_000_000, user: 1_000_000 };
 
 /** Cross-suite fixtures (`store` from 01, `projRoot` from 05). */
 export const shared = {};

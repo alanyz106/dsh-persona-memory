@@ -18,7 +18,6 @@
 |---|---|---|
 | `MEMORY.md` | `<dir>` | 事实/偏好/约定/环境 |
 | `USER.md` | `<dir>` | 用户画像 |
-| `failures.md` | `<dir>` | 结构化失败与纠正 |
 | `STANDING.md` | `<dir>` | 常驻指令（仅用户可写） |
 | `project-registry.json` | `<dir>` | 已登记项目的 `name → root` |
 | `AGENTS.md` | 各仓库根 | 常驻区 + `@memory/*.md` 索引行 |
@@ -27,6 +26,6 @@
 ## 与 Pi 共用时的注意点
 
 - **避免同时写**：两边都是原子写，但 Pi 有跨进程锁，DSH 侧用**写前指纹预检**兜底——检测到外部改动就不覆盖并提示冲突。极端并发下仍可能互相感知不到，**不同时运行最安全**。
-- 覆盖的全局文件：`MEMORY.md` / `USER.md` / `STANDING.md` / `failures.md`。
+- 覆盖的全局文件：`MEMORY.md` / `USER.md` / `STANDING.md`。
 - 两边扫描标准一致，hermes 写入的内容 DSH 直接可读，反之亦然。
 - **项目记忆不与 Pi 共用**：仓库内的 `AGENTS.md` + `memory/` 是本插件独有的，Pi 的 `projects-memory/` 目录不再读取也不再写入。

@@ -1,6 +1,6 @@
 /**
  * Vector memory index — a DSH-side SQLite mirror that stores ONLY embedding
- * data for the shared MEMORY.md / USER.md / failures.md files.
+ * data for the shared MEMORY.md / USER.md files.
  *
  * Design (aligned with the FTS5 mirror but fingerprint-incremental):
  * - The Markdown files remain the single source of truth, shared byte-for-byte
@@ -24,8 +24,9 @@ import path from 'node:path';
 import { decodeEntry, type MemoryKind, type MemoryStore } from './memory-store.js';
 import type { EmbeddingProvider } from './embedding.js';
 
-const WHICHES: MemoryKind[] = ['memory', 'user', 'failure'];
-const SCHEMA_VERSION = 1;
+const WHICHES: MemoryKind[] = ['memory', 'user'];
+/** Bumped when the indexed store set or schema changes; a mismatch clears the derived rows. */
+const SCHEMA_VERSION = 2;
 
 export interface VectorSearchHit {
   which: string;

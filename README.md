@@ -14,7 +14,7 @@
 
 | 区 | 位置 | 何时加载 |
 |---|---|---|
-| 全局记忆 | `$DSH_HOME/memory/MEMORY.md` · `USER.md` · `failures.md` | 每请求注入（按预算截断） |
+| 全局记忆 | `$DSH_HOME/memory/MEMORY.md` · `USER.md` | 每请求注入（按预算截断） |
 | 项目记忆 | 各仓库 `AGENTS.md`（常驻区 + `@memory/*.md` 索引）+ `memory/` | 常驻区随仓库注入；主题文件按需读 |
 | 常驻指令 | `$DSH_HOME/memory/STANDING.md` | 每请求注入，**只有用户能写** |
 
@@ -44,7 +44,7 @@
 
 | 想做的事 | 看这里 |
 |---|---|
-| 自动学习 / 纠正 / 失败记忆 / 合并 | [doc/automation.md](doc/automation.md) |
+| 自动学习 / 合并 / 清理旧条目 | [doc/automation.md](doc/automation.md) |
 | 磁盘上是什么格式、怎么和 Pi 共存 | [doc/disk-format.md](doc/disk-format.md) |
 | 语义向量检索、CJK 检索 | [doc/vector-search.md](doc/vector-search.md) |
 
@@ -61,9 +61,9 @@
 
 **存储**：跨会话持久化、每请求注入、项目记忆随仓库提交/回滚、记忆老化（`created/last`）。
 
-**工具**：`memory`（全局读写）、`memory_search`（FTS5 + 可选向量 RRF）、`project_memory`（12 个 action）、`/standing`、`/correct`。
+**工具**：`memory`（全局读写）、`memory_search`（FTS5 + 可选向量 RRF）、`project_memory`（12 个 action）、`/standing`。
 
-**自动化**：后台学习（默认关）、纠正检测、失败记忆注入、超限自动合并。
+**自动化**：后台学习（默认关）、超限自动合并、管理页按天数清理旧条目。
 
 **安全**：每次写入过内容扫描（注入载荷 / 凭据 / 不可见 Unicode）；常驻指令模型无写入口；项目记忆路径全过 `safeMemoryRel`；管理接口要求在回环。
 

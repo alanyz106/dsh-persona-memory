@@ -3,7 +3,6 @@
  *   - concurrent adds never clobber (single-lock read-modify-write)
  *   - overflow is REFUSED, never silently trimmed
  *   - serialization is byte-identical (no trailing newline, section separator)
- *   - failure dedupe is scoped per project
  *   - the injected memory block is fenced against prompt injection
  */
 import fs from 'node:fs';
@@ -47,14 +46,6 @@ const byteTwoEnc = byteRaw.split(ENTRY_DELIMITER)[1];
 check('file has no trailing newline', !byteRaw.endsWith('\n'), JSON.stringify(byteRaw.slice(-12)));
 check('file is exactly two entries joined by the separator', byteRaw === `${byteOneEnc}${ENTRY_DELIMITER}${byteTwoEnc}`, JSON.stringify(byteRaw));
 check('serialized entries keep metadata', /^byte one <!-- created=\d{4}-\d{2}-\d{2}, last=\d{4}-\d{2}-\d{2} -->$/.test(byteOneEnc) && /^byte two <!-- created=\d{4}-\d{2}-\d{2}, last=\d{4}-\d{2}-\d{2} -->$/.test(byteTwoEnc));
-
-// 19. failure dedupe is scoped by project (hermes failure behavior)
-const scopeStore = createMemoryStore({ dir: path.join(testDir, 'scope') });
-const sf1 = await scopeStore.add('failure', '[failure] same text', { dedupe: true, project: 'alpha' });
-const sf2 = await scopeStore.add('failure', '[failure] same text', { dedupe: true, project: 'beta' });
-const sf3 = await scopeStore.add('failure', '[failure] same text', { dedupe: true, project: 'alpha' });
-check('failure dedupe allows distinct projects', sf1.added && sf2.added && sf3.added === false && sf3.duplicate === true, JSON.stringify([sf1, sf2, sf3]));
-check('failure entries carry project64 metadata', fs.readFileSync(path.join(testDir, 'scope', 'failures.md'), 'utf8').includes('project64='));
 
 // 20. prompt injection uses the memory-context fence (hermes fenceBlock)
 const fenced = renderMemoryBlock(shared.store, { memoryCharLimit: 5000, userCharLimit: 5000 });

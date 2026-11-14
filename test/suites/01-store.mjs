@@ -2,8 +2,8 @@
  * Suite 01 — global store: read/search/add/update/delete/rewrite against the
  * real hermes file format (a copy of the user's files, never the originals).
  *
- * Also creates `shared.store`, which later suites (failure memory, FTS, prompt
- * fencing) reuse instead of re-seeding their own MEMORY.md.
+ * Also creates `shared.store`, which later suites (FTS, prompt fencing) reuse
+ * instead of re-seeding their own MEMORY.md.
  */
 import fs from 'node:fs';
 import path from 'node:path';

@@ -4,7 +4,7 @@
 
 ## 设计要点
 
-- **存储不变**：MEMORY.md / USER.md / failures.md 仍是唯一真相源，与 Pi 逐字节共用不变。
+- **存储不变**：MEMORY.md / USER.md 仍是唯一真相源，与 Pi 逐字节共用不变。
 - **索引在 DSH 侧**：`.memory-vec.sqlite` 存在 `vectorIndexDir`（默认 `$DSH_HOME/memory`），**只存 embedding 数据**（向量 BLOB + sha256 指纹），Pi 完全不感知；索引可随时删除重建。
 - **指纹增量同步**：每次搜索前对比条目 sha256，**只对新增/变化的条目重新 embedding**——Pi 改共享文件后自动跟上，不重复计算存量。
 - **混合排序**：FTS5 精确匹配 + 向量语义匹配通过 **RRF（倒数排名融合）** 合并；向量不可用自动降级 FTS5/子串。

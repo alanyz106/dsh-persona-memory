@@ -15,10 +15,8 @@ import { cleanup, results } from './harness.mjs';
 const suites = [
   '01-store.mjs',
   '02-scanner-standing.mjs',
-  '03-failure-memory.mjs',
   '04-project-memory.mjs',
   '05-migration-planner.mjs',
-  '06-correction.mjs',
   '07-fts-cjk.mjs',
   '08-tools-guide.mjs',
   '09-store-semantics.mjs',
@@ -28,7 +26,6 @@ const suites = [
   '13-migration-e2e.mjs',
   '14-plugin-lifecycle.mjs',
   '15-learning.mjs',
-  '16-correct-command.mjs',
   '17-project-archive.mjs',
 ];
 

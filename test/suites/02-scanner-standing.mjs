@@ -9,6 +9,7 @@ import { scanContent } from '../../dist/lib/secret-scanner.js';
 import { withUsage } from '../../dist/lib/memory-tool.js';
 import { parseFacts } from '../../dist/lib/learning.js';
 import { createStandingStore, parseInstructions, normalizeInstruction } from '../../dist/lib/standing.js';
+import { registerStandingCommand } from '../../dist/lib/standing-command.js';
 import { parseConsolidatedOutput, validateConsolidation, buildConsolidationPrompt } from '../../dist/lib/consolidate.js';
 import { check, testDir } from '../harness.mjs';
 
@@ -114,3 +115,14 @@ check('consolidate rejects scanner-blocked entry', v3.ok === false && /blocked/.
 const v4 = validateConsolidation(currentRaw, null, { enableSecretScanning: true });
 check('consolidate rejects null output', v4.ok === false);
 check('consolidate prompt mentions limit and stale days', /Character limit: 5000/.test(buildConsolidationPrompt(['x <!-- created=2026-01-01, last=2026-01-01 -->'], 5000, 30)));
+
+// 6b. /standing must declare free-form input, or picking it from the menu runs
+// it bare and the user can never type `add <text>` (Web composer contract).
+let standingCommand = null;
+registerStandingCommand(
+  { commands: { register: (command) => { standingCommand = command; } } },
+  createStandingStore({ dir: path.join(testDir, 'cmd-standing'), maxEntries: 20, maxChars: 2000 }),
+);
+check('/standing declares a free-form input hint',
+  !!standingCommand && typeof standingCommand.input?.hint === 'string' && /add/.test(standingCommand.input.hint),
+  JSON.stringify(standingCommand && standingCommand.input));

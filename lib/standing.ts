@@ -8,9 +8,8 @@
  * the model has no reason to look. Prohibitions must be unconditionally present.
  *
  * Provenance: only the user (direct edit) or the `/standing` command write
- * here. Background learning, consolidation, and the correction detector never
- * touch this file, so a model-generated memory has no path into the
- * always-injected block.
+ * here. Background learning and consolidation never touch this file, so a
+ * model-generated memory has no path into the always-injected block.
  *
  * Format (hermes-compatible): one instruction per line, no delimiter, no
  * metadata. Blank lines, `#` comments, and a leading `-`/`*` bullet are

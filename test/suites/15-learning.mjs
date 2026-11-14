@@ -187,8 +187,7 @@ const learnSession = {
   ],
 };
 registerLifecycleHooks(learnCtx, learnStore, {
-  enableSecretScanning: true, correctionDetection: true, correctionPatternDetection: true,
-  correctionHumanOnly: true, correctionRateLimitTurns: 3,
+  enableSecretScanning: true,
   learnEnabled: true, learnHumanOnly: true, learnIntervalTurns: 10,
   learnRecentTurns: 2, learnMaxChars: 6000, learnTimeoutMs: 5000,
   learnProjectContext: true, learnProjectContextCharLimit: 1500,

@@ -36,7 +36,7 @@ export const ENTRY_DELIMITER = '\n§\n';
 export const DEFAULT_MEMORY_CHAR_LIMIT = 5000;
 export const DEFAULT_USER_CHAR_LIMIT = 5000;
 
-export type MemoryKind = 'memory' | 'user' | 'failure';
+export type MemoryKind = 'memory' | 'user';
 
 export interface DecodedEntry {
   text: string;
@@ -165,7 +165,7 @@ function normalizeContent(text: string): string {
 
 export interface MemoryStoreConfig {
   dir: string;
-  limits?: { memory?: number; user?: number; failure?: number };
+  limits?: { memory?: number; user?: number };
 }
 
 export function createMemoryStore(config: MemoryStoreConfig): MemoryStore {
@@ -174,7 +174,6 @@ export function createMemoryStore(config: MemoryStoreConfig): MemoryStore {
 
   function charLimitFor(which: MemoryKind): number {
     if (which === 'user') return limits.user ?? DEFAULT_USER_CHAR_LIMIT;
-    if (which === 'failure') return limits.failure ?? DEFAULT_MEMORY_CHAR_LIMIT * 2; // hermes: failures get more space
     return limits.memory ?? DEFAULT_MEMORY_CHAR_LIMIT;
   }
 
@@ -241,7 +240,6 @@ export function createMemoryStore(config: MemoryStoreConfig): MemoryStore {
 
   function fileFor(which: MemoryKind): string {
     if (which === 'user') return path.join(dir, 'USER.md');
-    if (which === 'failure') return path.join(dir, 'failures.md'); // hermes naming
     return path.join(dir, 'MEMORY.md');
   }
 
@@ -347,28 +345,15 @@ export function createMemoryStore(config: MemoryStoreConfig): MemoryStore {
     return list.map((e) => encodeEntry(e.text, e.created, e.lastReferenced, e.project));
   }
 
-  /**
-   * `dedupe` rejects exact-text duplicates (hermes failure behavior: scoped by
-   * project); `project` tags the entry with project64 metadata (hermes failure
-   * scopes).
-   */
-  async function add(which: MemoryKind, content: string, opts: { dedupe?: boolean; project?: string | null } = {}): Promise<StoreAddResult & { conflict?: boolean }> {
+  /** Append one entry, refusing the write when it would exceed the char limit. */
+  async function add(which: MemoryKind, content: string): Promise<StoreAddResult & { conflict?: boolean }> {
     const file = fileFor(which);
     const limit = charLimitFor(which);
     return mutate<StoreAddResult>(file, (entries) => {
-      const project = opts.project ?? null;
-      if (opts.dedupe) {
-        const duplicate = decoded(entries).some((e) =>
-          e.text === content && (which !== 'failure' || e.project === project));
-        if (duplicate) {
-          return { value: { which, file, added: false, duplicate: true, entryCount: entries.length, charCount: charCount(entries) } };
-        }
-      }
       const t = today();
-      const next = [...entries, encodeEntry(normalizeContent(content), t, t, project)];
+      const next = [...entries, encodeEntry(normalizeContent(content), t, t, null)];
       if (charCount(next) > limit) {
-        // hermes semantics: refuse the write when it would exceed the limit
-        // (the tool layer may auto-consolidate and retry).
+        // Refuse the write at capacity; the tool layer may auto-consolidate and retry.
         return { value: { which, file, added: false, overflow: true, limit, entryCount: entries.length, charCount: charCount(entries) } };
       }
       return { next, value: { which, file, added: true, entryCount: next.length, charCount: charCount(next) } };
@@ -492,7 +477,7 @@ export function createMemoryStore(config: MemoryStoreConfig): MemoryStore {
   }
 
   async function search(query: string, which: MemoryKind | 'all', maxResults: number): Promise<StoreSearchHit[]> {
-    const wanted: MemoryKind[] = which === 'all' ? ['memory', 'user', 'failure'] : [which];
+    const wanted: MemoryKind[] = which === 'all' ? ['memory', 'user'] : [which];
     // Whitespace-separated terms are an AND over case-insensitive substrings:
     // the linear fallback (and every project-scoped search) then behaves like
     // the FTS5 token query instead of requiring one contiguous phrase.

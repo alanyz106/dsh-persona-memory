@@ -19,6 +19,12 @@ export function registerStandingCommand(ctx: Context, store: StandingStore): voi
     name: 'standing',
     description:
       'List or manage always-active standing instructions (STANDING.md). Usage: /standing, /standing add <text>, /standing remove <n>, /standing clear',
+    // `input` is load-bearing in the Web composer, not merely a hint: a
+    // descriptor that declares free-form input is a "leading claim", so a menu
+    // pick or Tab inserts `/standing ` as a chip and leaves the caret in the
+    // draft. Without it the command runs bare the instant it is picked, so a
+    // user can only ever list instructions and never type `add <text>`.
+    input: { hint: 'add <text> | remove <n> | clear' },
     handler: async ({ rawInput }) => {
       const input = rawInput.trim();
       try {

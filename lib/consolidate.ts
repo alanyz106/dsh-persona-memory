@@ -2,12 +2,12 @@
  * Auto-consolidation — when a store exceeds its char limit, call the session's
  * own LLM route to merge/age the entries, and commit ONLY when the result is
  * strictly smaller, fully parseable, and passes the content scanner (hermes's
- * "refreshed < current" safety rule). Failures never corrupt memory: they just
- * leave the store over budget and log a warning.
+ * "refreshed < current" safety rule). A failed consolidation never corrupts
+ * memory: it just leaves the store over budget and logs a warning.
  *
  * Aging: entries carry `<!-- created=..., last=... -->` metadata; the prompt
  * marks entries older than `consolidateStaleDays` without recent references as
- * removal candidates, and preserves user preferences and corrections first.
+ * removal candidates, and preserves user preferences first.
  */
 import { ENTRY_DELIMITER, decodeEntry, type MemoryStore } from './memory-store.js';
 import { callLlm, type LlmRoute } from './llm-helper.js';
@@ -20,7 +20,6 @@ const inflight = new Set<string>();
 export interface ConsolidationConfig {
   memoryCharLimit: number;
   userCharLimit: number;
-  failureCharLimit?: number;
   projectCharLimit?: number;
   enableSecretScanning: boolean;
   autoConsolidate: boolean;
@@ -38,7 +37,7 @@ export async function maybeConsolidate(
   store: MemoryStore,
   route: LlmRoute,
   cfg: ConsolidationConfig,
-  which: 'memory' | 'user' | 'failure',
+  which: 'memory' | 'user',
   limitOverride?: number,
 ): Promise<{ ran: boolean; reason?: string }> {
   // Key the in-flight guard by the store's own file path + which, so the
@@ -50,7 +49,7 @@ export async function maybeConsolidate(
     const current = await store.listRaw(which);
     if (current.length === 0) return { ran: false, reason: 'empty' };
     const currentChars = current.join(ENTRY_DELIMITER).length;
-    const limit = limitOverride ?? (which === 'user' ? cfg.userCharLimit : which === 'failure' ? (cfg.failureCharLimit ?? cfg.memoryCharLimit * 2) : cfg.memoryCharLimit);
+    const limit = limitOverride ?? (which === 'user' ? cfg.userCharLimit : cfg.memoryCharLimit);
     if (currentChars <= limit) return { ran: false, reason: 'under-limit' };
 
     const prompt = buildConsolidationPrompt(current, limit, cfg.consolidateStaleDays);

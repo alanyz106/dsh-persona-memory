@@ -7,7 +7,6 @@ import { HarnessError } from '@deepseek-ai/dsh-llm';
 import { defineTool, type ToolRunContext } from '@deepseek-ai/dsh-tools';
 import type { JsonValue } from './json-value.js';
 import { maybeConsolidate, type ConsolidationConfig } from './consolidate.js';
-import { buildFailureText, mergeFailureUpdate } from './failures.js';
 import { latestRoute, type LlmRoute } from './llm-helper.js';
 import { scanContent } from './secret-scanner.js';
 import type { MemoryKind, MemoryStore } from './memory-store.js';
@@ -28,17 +27,15 @@ function logWrite(
   preview: string,
 ): void {
   const sessionId = (exec as { agent?: { id?: string } } | undefined)?.agent?.id ?? 'unknown-session';
-  const outcome = result.duplicate
-    ? 'duplicate'
-    : result.overflow
-      ? 'overflow-refused'
-      : result.conflict
-        ? 'conflict'
-        : action === 'delete'
-          ? (result.deleted ? 'deleted' : 'not-found')
-          : action === 'rewrite'
-            ? `entries=${result.entryCount}`
-            : 'ok';
+  const outcome = result.overflow
+    ? 'overflow-refused'
+    : result.conflict
+      ? 'conflict'
+      : action === 'delete'
+        ? (result.deleted ? 'deleted' : 'not-found')
+        : action === 'rewrite'
+          ? `entries=${result.entryCount}`
+          : 'ok';
   ctx.logger.info(
     '[dsh-persona-memory] memory %s %s %s (%s): %s',
     action,
@@ -55,9 +52,8 @@ export interface MemoryToolConfig extends ConsolidationConfig {
   usageNudgeThreshold: number;
 }
 
-function limitFor(which: MemoryKind, config: { memoryCharLimit: number; userCharLimit: number; failureCharLimit?: number }): number {
+function limitFor(which: MemoryKind, config: { memoryCharLimit: number; userCharLimit: number }): number {
   if (which === 'user') return config.userCharLimit;
-  if (which === 'failure') return config.failureCharLimit ?? config.memoryCharLimit * 2; // hermes: failures get more space
   return config.memoryCharLimit;
 }
 
@@ -72,13 +68,14 @@ export function registerMemoryTool(
       description:
         'Manage the persistent long-term persona memory that survives across sessions. ' +
         'Stores: `memory` (global facts, preferences, conventions, environment details), `user` ' +
-        '(who the user is, their preferences and communication style), `failure` ' +
-        '(failures and lessons — recent ones are injected every request so mistakes are not repeated), ' +
-        'Project-specific knowledge does NOT belong here — use the `project_memory` tool for that. ' +
+        '(who the user is, their preferences and communication style). ' +
+        'Cross-project lessons and durable rules belong in `memory`; the user\'s own always-on ' +
+        'rules belong in STANDING.md, which only the user edits (`/standing`, not this tool). ' +
+        'A lesson that only makes sense in THIS repository (its build, deploy, architecture, a bug ' +
+        'specific to this codebase) does NOT go here: record it in this repository\'s project memory ' +
+        'via `project_memory` (a `memory/pitfalls.md` topic and/or a resident rule). ' +
         'Actions: read (show current memory), add (append one entry), update (replace an entry ' +
-        'whose text contains `match` — for `failure` this is a PARTIAL edit: `content`, ' +
-        '`failure_reason` and `corrected_to` you omit are kept from the existing entry, and `""` clears one), ' +
-        'delete (remove an entry whose text contains `match`), ' +
+        'whose text contains `match`), delete (remove an entry whose text contains `match`), ' +
         'rewrite (replace the whole file — use for consolidation). Entries are free-form single-line ' +
         'blocks; keep each one self-contained and dated in spirit. Never store credentials — writes are scanned.',
       parameters: {
@@ -90,25 +87,12 @@ export function registerMemoryTool(
         },
         which: {
           type: 'string',
-          enum: ['memory', 'user', 'failure'],
-          description: 'Which store to touch. Default: memory.',
-        },
-        category: {
-          type: 'string',
-          enum: ['failure', 'correction', 'insight', 'preference', 'convention', 'tool-quirk'],
-          description: 'Failure category tag: for which=failure add/update. Omitted on update keeps the current one.',
-        },
-        failure_reason: {
-          type: 'string',
-          description: 'Why it went wrong: for which=failure add/update. Omitted on update keeps the current value; "" clears it.',
-        },
-        corrected_to: {
-          type: 'string',
-          description: 'What was corrected / what to do instead: for which=failure add/update. Omitted on update keeps the current value; "" clears it.',
+          enum: ['memory', 'user'],
+          description: 'Which store to touch. Default: memory. Repository-specific knowledge belongs in `project_memory`, not here.',
         },
         content: {
           type: 'string',
-          description: 'Entry text (for add/update) or full document content (for rewrite). Optional on which=failure update to change only the structured fields.',
+          description: 'Entry text (for add/update) or full document content (for rewrite).',
         },
         match: {
           type: 'string',
@@ -124,8 +108,11 @@ export function registerMemoryTool(
       async execute(args, exec) {
         const targetStore = store;
         const which = args.which ?? 'memory';
-        if (which !== 'memory' && which !== 'user' && which !== 'failure') {
-          throw new HarnessError(`Unknown memory store "${which}"`, 'MEMORY_INVALID_WHICH');
+        if (which !== 'memory' && which !== 'user') {
+          throw new HarnessError(
+            `Unknown memory store "${which}" — use "memory" or "user"; repository-specific knowledge belongs in \`project_memory\`.`,
+            'MEMORY_INVALID_WHICH',
+          );
         }
         const limit = limitFor(which, config);
         const label = which;
@@ -136,17 +123,10 @@ export function registerMemoryTool(
             result = (await targetStore.read(which, limit)) as unknown as Record<string, unknown>;
             break;
           case 'add': {
-            const content = requireText(args.content, 'add');
-            const entry =
-              which === 'failure'
-                ? buildFailureText(content, { category: args.category, failureReason: args.failure_reason, correctedTo: args.corrected_to })
-                : content;
+            const entry = requireText(args.content, 'add');
             rejectBlocked(entry, config);
-            result = (await targetStore.add(which, entry, { dedupe: which === 'failure' })) as unknown as Record<string, unknown>;
+            result = (await targetStore.add(which, entry)) as unknown as Record<string, unknown>;
             logWrite(ctx, exec, 'add', which, result, entry);
-            if (result.duplicate) {
-              throw new HarnessError('That failure is already recorded — update it instead of adding a duplicate.', 'MEMORY_DUPLICATE_ENTRY');
-            }
             if (result.overflow) {
               result = await retryAfterConsolidation(args.action, entry, config, ctx, targetStore, routeFor(exec), which, limit);
             }
@@ -154,29 +134,7 @@ export function registerMemoryTool(
           }
           case 'update': {
             const match = requireText(args.match, 'update', 'match');
-            // For failures, an update is a PARTIAL edit: any of
-            // content / failure_reason / corrected_to that the caller omits is
-            // read back from the existing entry. Before this, `update` rebuilt
-            // the line from `content` alone and every failure lost its
-            // "Failed:" / "Corrected to:" fields.
-            let entry: string;
-            if (which === 'failure') {
-              const existing = await targetStore.findEntry(which, match);
-              if (existing === null) {
-                throw new HarnessError(
-                  `No failure entry matches "${match}" — nothing to update.`,
-                  'MEMORY_ENTRY_NOT_FOUND',
-                );
-              }
-              entry = mergeFailureUpdate(existing, {
-                content: args.content,
-                category: args.category,
-                failureReason: args.failure_reason,
-                correctedTo: args.corrected_to,
-              });
-            } else {
-              entry = requireText(args.content, 'update');
-            }
+            const entry = requireText(args.content, 'update');
             rejectBlocked(entry, config);
             result = (await targetStore.update(which, match, entry)) as unknown as Record<string, unknown>;
             logWrite(ctx, exec, 'update', which, result, `${match} -> ${entry}`);
@@ -269,7 +227,7 @@ async function retryAfterConsolidation(
   await maybeConsolidate(ctx, targetStore, route, config, which);
   let retried: Record<string, unknown>;
   if (action === 'add') {
-    retried = (await targetStore.add(which, payload as string, { dedupe: which === 'failure' })) as unknown as Record<string, unknown>;
+    retried = (await targetStore.add(which, payload as string)) as unknown as Record<string, unknown>;
   } else if (action === 'update') {
     const { content, match } = payload as { content: string; match: string };
     retried = (await targetStore.update(which, match, content)) as unknown as Record<string, unknown>;
@@ -315,7 +273,7 @@ function formatResult(value: unknown): string {
     return usage ? `${v.content}\n\n${usage}` : String(v.content);
   }
   const whichStr = String(v.which ?? '');
-  const file = `memory/${whichStr === 'user' ? 'USER.md' : whichStr === 'failure' ? 'failures.md' : 'MEMORY.md'}`;
+  const file = `memory/${whichStr === 'user' ? 'USER.md' : 'MEMORY.md'}`;
   let text: string;
   if (v.added) text = `Saved to ${file}. Now ${v.entryCount} entries (${v.charCount} chars).`;
   else if (v.updated !== undefined) {

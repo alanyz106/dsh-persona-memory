@@ -167,7 +167,7 @@ export function pruneSnapshots(historyDir: string, keep = BACKUP_KEEP): number {
 export const DEFAULT_ALLOWED_HOSTS_FILE = '/var/lib/cloudflared/dsh-url.txt';
 
 /** The four memory file basenames + project file prefix. */
-const MEMORY_FILES = ['MEMORY.md', 'USER.md', 'failures.md', 'STANDING.md'];
+const MEMORY_FILES = ['MEMORY.md', 'USER.md', 'STANDING.md'];
 const PROJECT_PREFIX = 'projects-';
 
 /**
@@ -410,10 +410,6 @@ export const CFG_SCHEMA: SchemaField[] = [
   { key: 'sectionOrder', type: 'number', label: '记忆段顺序', group: '基础' },
   { key: 'searchMaxResults', type: 'number', label: '搜索最大条数', group: '检索' },
   { key: 'usageNudgeThreshold', type: 'number', label: '用量提醒阈值', group: '基础', help: '0~1，达此比例提醒合并' },
-  { key: 'correctionDetection', type: 'bool', label: '纠正检测', group: '学习', help: 'feedback/record 自动存纠正条目' },
-  { key: 'correctionPatternDetection', type: 'bool', label: '对话内纠正检测', group: '学习' },
-  { key: 'correctionHumanOnly', type: 'bool', label: '仅人类会话纠正', group: '学习', help: '子代理/派生会话不产生纠正条目' },
-  { key: 'correctionRateLimitTurns', type: 'number', label: '纠正限频（轮）', group: '学习' },
   { key: 'learnEnabled', type: 'bool', label: '后台学习', group: '学习', help: '每 N 轮复习对话提取事实' },
   { key: 'learnHumanOnly', type: 'bool', label: '仅人类会话学习', group: '学习', help: '子代理/派生会话不提取事实写入记忆' },
   { key: 'learnIntervalTurns', type: 'number', label: '学习间隔（轮）', group: '学习' },
@@ -428,10 +424,6 @@ export const CFG_SCHEMA: SchemaField[] = [
   { key: 'standingEnabled', type: 'bool', label: '常驻指令注入', group: '常驻' },
   { key: 'standingCharLimit', type: 'number', label: '常驻字符预算', group: '常驻' },
   { key: 'standingMaxEntries', type: 'number', label: '常驻最大条数', group: '常驻' },
-  { key: 'failureInjectionEnabled', type: 'bool', label: '失败记忆注入', group: '失败' },
-  { key: 'failureMaxAgeDays', type: 'number', label: '失败记忆天数', group: '失败' },
-  { key: 'failureMaxEntries', type: 'number', label: '失败记忆条数', group: '失败' },
-  { key: 'failureCharLimit', type: 'number', label: '失败字符上限', group: '失败' },
   { key: 'projectEnabled', type: 'bool', label: '项目记忆', group: '项目', help: '按会话 cwd 定位 git 仓库根，读写其 AGENTS.md + memory/' },
   { key: 'projectFileCharLimit', type: 'number', label: '单文件字符上限', group: '项目', help: '每个 memory/<主题>.md 的上限' },
   { key: 'projectResidentCharLimit', type: 'number', label: '常驻区预算', group: '项目', help: 'AGENTS.md 常驻区字符上限' },
@@ -460,14 +452,12 @@ export const CFG_SCHEMA: SchemaField[] = [
 /** Config defaults (mirrors index.ts). */
 export const CFG_DEFAULTS: Record<string, unknown> = {
   memoryCharLimit: 5000, userCharLimit: 5000, enableSecretScanning: true, inject: true, injectHumanOnly: true,
-  sectionOrder: 55, searchMaxResults: 10, usageNudgeThreshold: 0.9, correctionDetection: true,
-  correctionPatternDetection: true, correctionHumanOnly: true,
-  correctionRateLimitTurns: 3, learnEnabled: false, learnHumanOnly: true, learnIntervalTurns: 10,
+  sectionOrder: 55, searchMaxResults: 10, usageNudgeThreshold: 0.9, learnEnabled: false,
+  learnHumanOnly: true, learnIntervalTurns: 10,
   learnRecentTurns: 2, learnMaxChars: 6000,
   learnTimeoutMs: 120000, learnProjectContext: true, learnProjectContextCharLimit: 1500,
   autoConsolidate: true, consolidateStaleDays: 30, consolidateTimeoutMs: 120000,
-  standingEnabled: true, standingCharLimit: 2000, standingMaxEntries: 20, failureInjectionEnabled: true,
-  failureMaxAgeDays: 7, failureMaxEntries: 5, failureCharLimit: 10000,
+  standingEnabled: true, standingCharLimit: 2000, standingMaxEntries: 20,
   projectEnabled: true, projectFileCharLimit: 20000, projectResidentCharLimit: 6000,
   projectIndexCharLimit: 4000, projectAutoMigrate: true, projectMigrateTimeoutMs: 1200000, projectBootstrapHint: true,
   memoryFtsEnabled: true, vectorEnabled: false, embeddingProvider: 'remote', embeddingModel: 'text-embedding-3-small',
@@ -903,12 +893,10 @@ export function makeAdminRoutes(deps: AdminRouteDeps): WebRoute[] {
   /** Store summaries for the status page. */
   function summarizeStores(): Record<string, StoreSummary> {
     const out: Record<string, StoreSummary> = {};
-    for (const which of ['memory', 'user', 'failure'] as const) {
+    for (const which of ['memory', 'user'] as const) {
       const file = store.fileFor(which);
       const raw = readRaw(file);
-      const limit = which === 'user' ? cfgNum(cfg, 'userCharLimit', 5000)
-        : which === 'failure' ? cfgNum(cfg, 'failureCharLimit', cfgNum(cfg, 'memoryCharLimit', 5000) * 2)
-          : cfgNum(cfg, 'memoryCharLimit', 5000);
+      const limit = which === 'user' ? cfgNum(cfg, 'userCharLimit', 5000) : cfgNum(cfg, 'memoryCharLimit', 5000);
       out[which] = raw === null
         ? { exists: false, entries: 0, chars: 0, usagePct: 0 }
         : {
@@ -923,7 +911,7 @@ export function makeAdminRoutes(deps: AdminRouteDeps): WebRoute[] {
 
   /** Entry lists for the status page (raw text, decoded). */
   function listEntries(): Record<string, Array<{ text: string; created: string; lastReferenced: string; project: string | null }>> {
-    const out: Record<string, Array<{ text: string; created: string; lastReferenced: string; project: string | null }>> = { memory: [], user: [], failure: [] };
+    const out: Record<string, Array<{ text: string; created: string; lastReferenced: string; project: string | null }>> = { memory: [], user: [] };
     for (const which of Object.keys(out) as MemoryKind[]) {
       const raw = readRaw(store.fileFor(which));
       if (raw === null) continue;
@@ -1108,7 +1096,7 @@ export function makeAdminRoutes(deps: AdminRouteDeps): WebRoute[] {
    * Mutate one store by decoded-entry index.
    */
   async function mutateStore(which: string, change: StoreChange): Promise<MutateOutcome> {
-    if (!['memory', 'user', 'failure'].includes(which)) return { ok: false, error: 'invalid which' };
+    if (!['memory', 'user'].includes(which)) return { ok: false, error: 'invalid which' };
     const file = store.fileFor(which as MemoryKind);
     const raw = readRaw(file);
     if (raw === null) return { ok: false, error: 'file not found' };
@@ -1116,9 +1104,7 @@ export function makeAdminRoutes(deps: AdminRouteDeps): WebRoute[] {
     const outcome = change(current);
     if (outcome.error) return { ok: false, error: outcome.error };
     const next = outcome.next!.map((e) => encodeEntry(e.text, e.created, e.lastReferenced));
-    const limit = which === 'user' ? cfgNum(cfg, 'userCharLimit', 5000)
-      : which === 'failure' ? cfgNum(cfg, 'failureCharLimit', cfgNum(cfg, 'memoryCharLimit', 5000) * 2)
-        : cfgNum(cfg, 'memoryCharLimit', 5000);
+    const limit = which === 'user' ? cfgNum(cfg, 'userCharLimit', 5000) : cfgNum(cfg, 'memoryCharLimit', 5000);
     const charCount = next.length ? next.join(ENTRY_DELIMITER).length : 0;
     if (charCount > limit) return { ok: false, error: `容量超限（${charCount} > ${limit}），请先合并或精简` };
     writeRawAtomic(file, next.length ? next.join(ENTRY_DELIMITER) : '');
@@ -1238,6 +1224,55 @@ export function makeAdminRoutes(deps: AdminRouteDeps): WebRoute[] {
         return { next: list.filter((_, i) => i !== index), message: `${which} 条目已删除` };
       });
       writeJson(res, result.ok ? 200 : 400, result);
+    } },
+    /**
+     * Bulk-delete entries older than N days (`created` tag older than the
+     * cutoff). Destructive, so it snapshots the whole store into
+     * `<dir>/.trash/` first and aborts the delete when that snapshot fails.
+     * Entries without a `created` tag decode as "today", so they are kept.
+     */
+    { kind: 'exact', path: '/api/persona-memory/prune', handler: async (req: IncomingMessage, res: ServerResponse) => {
+      if (!guard(req, res, 'POST')) return;
+      const body = await readJsonBody(req);
+      if (body === undefined) { writeJson(res, 400, { error: 'invalid JSON body' }); return; }
+      const which = String(body.which || '');
+      if (!['memory', 'user'].includes(which)) { writeJson(res, 400, { error: 'invalid which' }); return; }
+      const days = Number(body.days);
+      if (!Number.isInteger(days) || days < 1 || days > 3650) {
+        writeJson(res, 400, { error: '天数需为 1–3650 的整数' });
+        return;
+      }
+      const cutoffDate = new Date();
+      cutoffDate.setDate(cutoffDate.getDate() - days);
+      const cutoff = cutoffDate.toISOString().split('T')[0];
+      const file = store.fileFor(which as MemoryKind);
+      const raw = readRaw(file);
+      if (raw === null) { writeJson(res, 404, { error: `${which} 文件不存在` }); return; }
+      if (!parseEntries(raw).map(decodeEntry).some((e) => e.created.slice(0, 10) < cutoff)) {
+        writeJson(res, 200, { ok: true, removed: 0, cutoff, message: `${which} 没有创建早于 ${cutoff} 的条目` });
+        return;
+      }
+      // Snapshot before the write: if the copy fails, nothing is deleted.
+      let snapshotRel = '';
+      try {
+        const memoryDir = resolveMemoryDir(cfg);
+        const trashDir = path.join(memoryDir, '.trash');
+        fs.mkdirSync(trashDir, { recursive: true });
+        const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..*$/, '').replace('T', '-');
+        const snapshot = path.join(trashDir, `${path.basename(file)}.${stamp}`);
+        writeRawAtomic(snapshot, raw);
+        snapshotRel = path.relative(memoryDir, snapshot);
+      } catch (e) {
+        writeJson(res, 500, { error: `删除前快照失败，已中止：${e instanceof Error ? e.message : String(e)}` });
+        return;
+      }
+      let removed = 0;
+      const result = await mutateStore(which, (list) => {
+        const kept = list.filter((e) => !(e.created.slice(0, 10) < cutoff));
+        removed = list.length - kept.length;
+        return { next: kept, message: `${which} 删除 ${removed} 条，保留 ${kept.length} 条` };
+      });
+      writeJson(res, result.ok ? 200 : 400, { ...result, removed, cutoff, snapshot: snapshotRel });
     } },
     { kind: 'exact', path: '/api/persona-memory/projectRead', handler: async (req: IncomingMessage, res: ServerResponse) => {
       if (!guard(req, res, 'POST')) return;

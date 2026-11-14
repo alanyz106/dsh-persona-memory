@@ -8,7 +8,7 @@
  * etc.). 0.1.x may carry only the parent link, so every signal is optional and
  * their absence means "human".
  *
- * Memory capture (injection, background learning, correction detection) is
+ * Memory capture (injection, background learning) is
  * gated on this: delegated workers should inherit context from their parent
  * instead of reading/writing the user's persona memory.
  */

@@ -22,7 +22,6 @@ import path from 'node:path';
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths';
 import { createEmbeddingProvider } from './lib/embedding.js';
 import { registerLifecycleHooks, type LearningConfig } from './lib/learning.js';
-import { renderRecentFailures } from './lib/failures.js';
 import { createMemoryStore, type MemoryStore } from './lib/memory-store.js';
 import { registerMemorySearchTool } from './lib/memory-search-tool.js';
 import { registerMemoryTool, type MemoryToolConfig } from './lib/memory-tool.js';
@@ -39,7 +38,6 @@ import { createFtsIndex } from './lib/fts.js';
 import { createVectorIndex } from './lib/vector-index.js';
 import { allowsInjection, sessionOf } from './lib/sessions.js';
 import { registerStandingCommand } from './lib/standing-command.js';
-import { registerCorrectCommand } from './lib/correct-command.js';
 import { createStandingStore, type StandingStore } from './lib/standing.js';
 import type { Context } from '@deepseek-ai/cordis';
 
@@ -61,11 +59,6 @@ export interface PluginConfig {
   sectionOrder: number;
   searchMaxResults: number;
   usageNudgeThreshold: number;
-  correctionDetection: boolean;
-  correctionPatternDetection: boolean;
-  /** Only run correction detection in human-driven sessions. */
-  correctionHumanOnly: boolean;
-  correctionRateLimitTurns: number;
   learnEnabled: boolean;
   /** Only run background learning in human-driven sessions. */
   learnHumanOnly: boolean;
@@ -83,10 +76,6 @@ export interface PluginConfig {
   standingEnabled: boolean;
   standingCharLimit: number;
   standingMaxEntries: number;
-  failureInjectionEnabled: boolean;
-  failureMaxAgeDays: number;
-  failureMaxEntries: number;
-  failureCharLimit: number;
   projectEnabled: boolean;
   projectFileCharLimit: number;
   projectResidentCharLimit: number;
@@ -276,11 +265,6 @@ export function apply(ctx: Context, config?: Record<string, unknown>): void {
     searchMaxResults: 10,
     // usage reporting + consolidation nudge
     usageNudgeThreshold: 0.9,
-    // correction detection on feedback/record + in-chat pattern detection
-    correctionDetection: true,
-    correctionPatternDetection: true,
-    correctionHumanOnly: true,
-    correctionRateLimitTurns: 3,
     // background learning is opt-in: the shipped default keeps the agent from
     // writing inferred facts unless the operator turns it back on
     learnEnabled: false,
@@ -302,11 +286,6 @@ export function apply(ctx: Context, config?: Record<string, unknown>): void {
     standingEnabled: true,
     standingCharLimit: 2000,
     standingMaxEntries: 20,
-    // failure memory (failures.md): recent failures injected every request
-    failureInjectionEnabled: true,
-    failureMaxAgeDays: 7,
-    failureMaxEntries: 5,
-    failureCharLimit: 10000, // hermes: failures get memoryCharLimit * 2
     // project memory (projects-memory/<name>/MEMORY.md, Pi-compatible root)
     projectEnabled: true,
     // 单个 memory/<topic>.md 的字符上限（主题拆分后每个文件可以比全局记忆大）
@@ -326,7 +305,7 @@ export function apply(ctx: Context, config?: Record<string, unknown>): void {
     memoryFtsEnabled: true,
     // Semantic (vector) memory search: a DSH-side SQLite cache storing ONLY
     // embeddings for the shared Markdown files. Fingerprint-incremental: Pi's
-    // writes to MEMORY.md/USER.md/failures.md are picked up on next search.
+    // writes to MEMORY.md/USER.md are picked up on next search.
     // Off by default; enable with vectorEnabled + an embedding provider.
     vectorEnabled: false,
     // Directory for the derived vector index. Kept under the DSH home (never
@@ -360,7 +339,7 @@ export function apply(ctx: Context, config?: Record<string, unknown>): void {
   };
   cfg.dir = resolveDir(config); // explicit config.dir wins; defaults re-resolved
 
-  // The plugin's audit trail: every memory write (tool, learning, correction,
+  // The plugin's audit trail: every memory write (tool, learning,
   // consolidation) logs one line, and this sink is what puts them on disk.
   registerFileLogger(ctx, {
     fileLogEnabled: cfg.fileLogEnabled,
@@ -373,7 +352,6 @@ export function apply(ctx: Context, config?: Record<string, unknown>): void {
     limits: {
       memory: cfg.memoryCharLimit,
       user: cfg.userCharLimit,
-      failure: cfg.failureCharLimit ?? cfg.memoryCharLimit * 2,
     },
   });
   const standing: StandingStore = createStandingStore({
@@ -484,11 +462,6 @@ export function apply(ctx: Context, config?: Record<string, unknown>): void {
   if (cfg.standingEnabled) {
     registerStandingCommand(ctx, standing);
   }
-  // /correct 显式纠正入口（原先是搭官方 /feedback 的事件便车，语义错位，已解耦）。
-  // 纠正检测关闭时命令也没有存在意义，跟随 correctionDetection 开关。
-  if (cfg.correctionDetection) {
-    registerCorrectCommand(ctx, store, cfg as LearningConfig);
-  }
 
   if (cfg.inject) {
     /** Derived sessions (subagent / workflow child / team member) skip injection. */
@@ -499,14 +472,6 @@ export function apply(ctx: Context, config?: Record<string, unknown>): void {
         name: 'memory:standing',
         order: Math.max(0, cfg.sectionOrder - 5),
         text: '{{standing_block}}',
-      });
-    }
-    if (cfg.failureInjectionEnabled) {
-      ctx.systemPrompt.variable('failures_block', (context) => (hidden(context) ? '' : renderRecentFailures(store, cfg)));
-      ctx.systemPrompt.section({
-        name: 'memory:failures',
-        order: Math.max(0, cfg.sectionOrder - 3),
-        text: '{{failures_block}}',
       });
     }
     if (cfg.projectEnabled) {
@@ -548,7 +513,7 @@ export function apply(ctx: Context, config?: Record<string, unknown>): void {
       return [
         '## Persistent persona memory',
         'You have a persistent long-term memory stored on disk that survives across sessions, shared with your other agent instances. It is managed through the `memory` tool and searched with `memory_search`.',
-        'Keep it current: record durable facts about the user, their preferences, project conventions, and environment details; update or delete entries when they change. User corrections and periodic reviews are captured automatically, but you should still save important facts immediately via `memory add`. Never store credentials — writes are scanned and rejected.',
+        'Keep it current: record durable facts about the user, their preferences, conventions, environment details, and cross-project lessons; update or delete entries when they change. Repository-specific knowledge belongs in that repository\'s project memory (`project_memory`), and the user\'s own always-on rules live in STANDING.md (user-authored via `/standing`). Never store credentials — writes are scanned and rejected.',
         'Current memory:',
         renderMemoryBlock(store, cfg),
       ].join('\n\n');

@@ -22,7 +22,7 @@ import path from 'node:path';
 import { decodeEntry, type MemoryKind, type MemoryStore } from './memory-store.js';
 import { bigramize, queryTerms, quoteTerm } from './cjk-tokenizer.js';
 
-const WHICHES: MemoryKind[] = ['memory', 'user', 'failure'];
+const WHICHES: MemoryKind[] = ['memory', 'user'];
 
 /**
  * Bumped whenever the FTS schema or the tokenization changes. A mismatch drops
@@ -32,8 +32,10 @@ const WHICHES: MemoryKind[] = ['memory', 'user', 'failure'];
  * v2: added the `grams` bigram column so CJK substrings are searchable
  *     (v1 searched the raw text with unicode61, which cannot match Chinese
  *     substrings at all).
+ * v3: the `failure` store was removed; the version bump drops its leftover
+ *     rows together with the rest of the derived table.
  */
-const FTS_SCHEMA_VERSION = 2;
+const FTS_SCHEMA_VERSION = 3;
 
 export interface FtsSearchHit {
   which: string;

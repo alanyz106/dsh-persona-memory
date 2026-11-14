@@ -292,3 +292,63 @@ check('admin exposes the project route family', ['projectRead', 'projectWrite', 
   check('progress detail shows the configured 15-minute timeout',
     stages.some((line) => line.includes('最长 15 分钟')), stages.find((line) => line.includes('stage=planning')) || '');
 }
+
+// 25b. entry dates + bulk prune by age (MEMORY.md, the only stores left)
+{
+  const pMem = fs.mkdtempSync(path.join(testDir, 'prunemem-'));
+  const todayStr = new Date().toISOString().slice(0, 10);
+  fs.writeFileSync(path.join(pMem, 'MEMORY.md'), [
+    'old fact <!-- created=2020-01-01, last=2020-01-02 -->',
+    `recent fact <!-- created=${todayStr}, last=${todayStr} -->`,
+    'untagged fact',
+  ].join('\n§\n') + '\n');
+  const pRoutes = makeAdminRoutes({
+    store: createMemoryStore({ dir: pMem, limits: BIG_LIMITS }),
+    standing: createStandingStore({ dir: pMem, maxEntries: 20, maxChars: 2000 }),
+    vector: {},
+    cfg: { dir: pMem, autoBackupMin: 0 },
+    ctx: { logger: { warn() {}, info() {} } },
+    getRoute: () => undefined,
+    profilePatch: path.join(testDir, 'prune.yml'),
+    log: () => {},
+  });
+  const statusRoute = pRoutes.find((r) => r.path === '/api/persona-memory/status');
+  const pruneRoute = pRoutes.find((r) => r.path === '/api/persona-memory/prune');
+  check('admin exposes the prune route', !!pruneRoute);
+
+  const statusRes = makeRes();
+  await statusRoute.handler(getReq(), statusRes);
+  const payload = JSON.parse(statusRes.body || '{}');
+  check('status exposes only the remaining global stores',
+    Object.keys(payload.entries).sort().join(',') === 'memory,user' && !('failure' in payload.stores),
+    JSON.stringify(Object.keys(payload.entries)));
+  const entries = payload.entries.memory || [];
+  check('entries carry creation and reference dates',
+    entries.length === 3 && entries[0].created === '2020-01-01' && entries[0].lastReferenced === '2020-01-02',
+    JSON.stringify(entries.map((e) => [e.created, e.lastReferenced])));
+
+  const badDays = makeRes();
+  await pruneRoute.handler(postReq({ which: 'memory', days: 0 }), badDays);
+  check('prune refuses a non-positive day count', badDays.statusCode === 400, badDays.body);
+  const badWhich = makeRes();
+  await pruneRoute.handler(postReq({ which: 'standing', days: 30 }), badWhich);
+  check('prune refuses an unknown store', badWhich.statusCode === 400, badWhich.body);
+
+  const pruneRes = makeRes();
+  await pruneRoute.handler(postReq({ which: 'memory', days: 30 }), pruneRes);
+  const pruned = JSON.parse(pruneRes.body || '{}');
+  const afterRaw = fs.readFileSync(path.join(pMem, 'MEMORY.md'), 'utf8');
+  check('prune removes only entries older than the cutoff',
+    pruneRes.statusCode === 200 && pruned.removed === 1 && !afterRaw.includes('old fact'),
+    `${pruneRes.statusCode} removed=${pruned.removed}`);
+  check('prune keeps recent and untagged entries',
+    afterRaw.includes('recent fact') && afterRaw.includes('untagged fact'), afterRaw);
+  const trashDir = path.join(pMem, '.trash');
+  check('prune snapshots the store before deleting',
+    fs.existsSync(trashDir) && fs.readdirSync(trashDir).some((f) => f.startsWith('MEMORY.md.')),
+    fs.existsSync(trashDir) ? String(fs.readdirSync(trashDir)) : 'no .trash');
+  const again = makeRes();
+  await pruneRoute.handler(postReq({ which: 'memory', days: 30 }), again);
+  check('a second prune reports nothing left to delete',
+    again.statusCode === 200 && JSON.parse(again.body || '{}').removed === 0, again.body);
+}

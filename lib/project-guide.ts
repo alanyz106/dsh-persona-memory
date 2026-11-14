@@ -31,7 +31,7 @@ export const PROJECT_CORE_LINES: readonly string[] = [
   '项目记忆分两区：`AGENTS.md` 的常驻区（除 `@` 行外的全部内容）每次请求都在上下文里，只放项目约定俗成、不做就会错的硬约束；末尾 `@memory/*.md` 索引行指向的主题文件按需读取。',
   '记账前先 `project_memory list` 看有没有同主题：有就 `append` 追加，没有才 `write`（`write` 带一行 `summary`，索引行自动维护）。',
   '架构说明、业务流程、踩坑日志、SOP、历史决策写进 `memory/<主题>.md`；一句话讲不清「为什么」的细节不要塞常驻区。',
-  '跨项目的事实与用户偏好用全局 `memory` 工具；`project_memory guide` 取完整写法、边界规则与示例。',
+  '跨项目的事实、用户偏好和通用教训用全局 `memory` 工具写 `MEMORY.md` / `USER.md`；用户亲笔、始终生效的硬规则走 `/standing`（STANDING.md，模型无写入口）；只在本仓库成立的踩坑写 `memory/pitfalls.md`。`project_memory guide` 取完整写法、边界规则与示例。',
 ];
 
 /** One fence-safe code block: the guide contains ```markdown examples. */
@@ -94,8 +94,8 @@ const GUIDE_BODY: readonly string[] = [
   '',
   '| 内容 | 写到哪 |',
   '|---|---|',
-  '| 用户偏好、跨项目事实、通用环境怪癖 | 全局 `memory` 工具（MEMORY.md / USER.md） |',
-  '| 只在这个仓库成立的约定、架构、坑、SOP | 项目记忆（AGENTS.md + memory/） |',
+  '| 用户偏好、跨项目事实、通用环境怪癖、**换仓库仍会重犯的教训** | 全局 `memory` 工具（MEMORY.md / USER.md） |',
+  '| 只在这个仓库成立的约定、架构、坑、SOP | 项目记忆（AGENTS.md + memory/，踩坑写 `memory/pitfalls.md`） |',
   '| 用户亲笔、始终生效、高于模型默认行为 | `/standing`（STANDING.md），模型无写入口 |',
   '',
   '三条判据：',

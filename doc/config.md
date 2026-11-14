@@ -44,25 +44,17 @@
 | `learnTimeoutMs` | `120000` | 学习 LLM 调用超时 |
 | `learnProjectContext` | `true` | 把项目记忆摘要一并给学习模型做「已存在则跳过」判断 |
 | `learnProjectContextCharLimit` | `1500` | 上述摘要的字符预算 |
-| `correctionDetection` | `true` | 是否启用纠正检测（`/correct` 命令） |
-| `correctionPatternDetection` | `true` | 对话内纠正模式检测 |
-| `correctionHumanOnly` | `true` | 仅人类主会话产生纠正条目 |
-| `correctionRateLimitTurns` | `3` | 对话内纠正的最小保存间隔（轮） |
 | `autoConsolidate` | `true` | 超限时自动 LLM 合并（严格更小才提交） |
 | `consolidateStaleDays` | `30` | 合并时判定"陈旧可删"的天数 |
 | `consolidateTimeoutMs` | `120000` | 合并 LLM 调用超时 |
 
-## 常驻指令与失败记忆
+## 常驻指令
 
 | 键 | 默认 | 含义 |
 |---|---|---|
 | `standingEnabled` | `true` | 启用常驻指令（STANDING.md + `/standing`） |
 | `standingCharLimit` | `2000` | STANDING.md 注入预算（硬上限） |
 | `standingMaxEntries` | `20` | STANDING.md 最大条数（硬上限） |
-| `failureInjectionEnabled` | `true` | 是否注入最近失败 |
-| `failureMaxAgeDays` | `7` | 失败注入窗口（按 created 日期） |
-| `failureMaxEntries` | `5` | 失败注入最多条数 |
-| `failureCharLimit` | `10000` | failures.md 字符上限 |
 
 ## 项目记忆
 

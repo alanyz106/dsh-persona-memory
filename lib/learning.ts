@@ -1,14 +1,10 @@
 /**
  * Lifecycle hooks — the "auto" half of dsh-persona-memory.
  *
- * 1. Correction detection: on the durable `feedback/record` session event
- *    (the /feedback command), save a `[correction]` failure entry to
- *    failures.md immediately — the model cannot learn from feedback that
- *    arrives after its own message, so this is a host-side hook.
- * 2. Background learning: count `turn/end` events per session and every
- *    `learnIntervalTurns` turns call the session's own LLM route to review
- *    the recent transcript and extract durable facts, saving them via the
- *    store. All writes still pass the content scanner.
+ * Background learning: count `turn/end` events per session and every
+ * `learnIntervalTurns` turns call the session's own LLM route to review the
+ * recent transcript and extract durable facts, saving them via the store. All
+ * writes still pass the content scanner.
  *
  * Background learning writes the GLOBAL stores only. Project knowledge is
  * excluded by design: splitting it into resident rules + topic files needs the
@@ -20,8 +16,6 @@
 import { scanContent } from './secret-scanner.js';
 import { callLlm, latestRoute, sessionEvents, type LlmRoute } from './llm-helper.js';
 import { maybeConsolidate, type ConsolidationConfig } from './consolidate.js';
-import { buildFailureText } from './failures.js';
-import { extractCorrectionDirective, isCorrection } from './correction.js';
 import { renderAgents, readIndex, resolveProjectRoot, type ProjectIndex } from './project-memory.js';
 import { isDerivedSession } from './sessions.js';
 import type { MemoryStore } from './memory-store.js';
@@ -55,11 +49,6 @@ const inflight = new Set<string>();
 
 export interface LearningConfig extends ConsolidationConfig {
   enableSecretScanning: boolean;
-  correctionDetection: boolean;
-  correctionPatternDetection: boolean;
-  /** Only run correction detection in human-driven sessions. */
-  correctionHumanOnly: boolean;
-  correctionRateLimitTurns: number;
   learnEnabled: boolean;
   /** Only run background learning in human-driven sessions. */
   learnHumanOnly: boolean;
@@ -79,21 +68,16 @@ export interface LearningConfig extends ConsolidationConfig {
 export type SessionCwdOf = (session: Session | unknown) => string | null;
 
 /**
- * What this session is allowed to feed back into memory. Derived sessions
+ * Whether this session may feed facts back into memory. Derived sessions
  * (subagent / workflow child / AgentTeams member) execute delegated work; their
- * chatter must not become user facts or corrections, and a main session keeps
- * the historical behavior.
- * @returns the two independent switches the session/event hook consults
+ * chatter must not become user facts.
  */
 export function sessionCapturePolicy(
-  cfg: Pick<LearningConfig, 'learnEnabled' | 'correctionDetection' | 'learnHumanOnly' | 'correctionHumanOnly'>,
+  cfg: Pick<LearningConfig, 'learnEnabled' | 'learnHumanOnly'>,
   session: unknown,
-): { learning: boolean; corrections: boolean } {
+): { learning: boolean } {
   const derived = isDerivedSession(session);
-  return {
-    learning: cfg.learnEnabled && !(cfg.learnHumanOnly && derived),
-    corrections: cfg.correctionDetection && !(cfg.correctionHumanOnly && derived),
-  };
+  return { learning: cfg.learnEnabled && !(cfg.learnHumanOnly && derived) };
 }
 
 export function registerLifecycleHooks(
@@ -104,126 +88,25 @@ export function registerLifecycleHooks(
 ): void {
   /** turn counts per session id */
   const turnCounts = new Map<string, number>();
-  /** sessions with a pending in-chat correction this turn */
-  const pendingCorrections = new Set<string>();
-  /** turns since last correction save, per session */
-  const turnsSinceCorrection = new Map<string, number>();
 
   ctx.on('session/event', (session, event) => {
     try {
-      const allowed = sessionCapturePolicy(cfg, session);
-      if (!allowed.learning && !allowed.corrections) return;
-      // In-chat correction detection — only on DIRECT human prompts
-      // (source.kind === 'user'; synthetic contexts are 'plugin').
-      if (event.type === 'user/message' && allowed.corrections && cfg.correctionPatternDetection) {
-        const msg = event.data;
-        if (msg?.source?.kind === 'user') {
-          const text = msg.content
-            ?.filter((b) => b.type === 'text')
-            .map((b) => b.text)
-            .join(' ')
-            .trim();
-          if (text && isCorrection(text, cfg)) {
-            pendingCorrections.add(session.id);
-          }
-        }
-        return;
-      }
-      if (event.type === 'turn/end') {
-        // In-chat correction captured at turn end (rate-limited).
-        if (pendingCorrections.has(session.id) && allowed.corrections && cfg.correctionPatternDetection) {
-          pendingCorrections.delete(session.id);
-          const since = turnsSinceCorrection.get(session.id) ?? cfg.correctionRateLimitTurns;
-          if (since >= cfg.correctionRateLimitTurns) {
-            turnsSinceCorrection.set(session.id, 0);
-            const text = lastDirectUserText(session);
-            if (text) {
-              saveCorrection(store, cfg, extractCorrectionDirective(text), 'pattern', ctx.logger).catch((err) =>
-                ctx.logger.warn('[dsh-persona-memory] correction save failed: %s', (err as Error | undefined)?.message ?? String(err)),
-              );
-            }
-          } else {
-            turnsSinceCorrection.set(session.id, since + 1);
-          }
-        } else {
-          turnsSinceCorrection.set(session.id, (turnsSinceCorrection.get(session.id) ?? 0) + 1);
-        }
-        if (allowed.learning) {
-          const n = (turnCounts.get(session.id) ?? 0) + 1;
-          if (n >= cfg.learnIntervalTurns) {
-            turnCounts.set(session.id, 0);
-            runLearning(ctx, store, cfg, session, cwdOf).catch((err) =>
-              ctx.logger.warn('[dsh-persona-memory] background learning failed: %s', (err as Error | undefined)?.message ?? String(err)),
-            );
-          } else {
-            turnCounts.set(session.id, n);
-          }
-        }
+      if (!sessionCapturePolicy(cfg, session).learning) return;
+      if (event.type !== 'turn/end') return;
+      const n = (turnCounts.get(session.id) ?? 0) + 1;
+      if (n >= cfg.learnIntervalTurns) {
+        turnCounts.set(session.id, 0);
+        runLearning(ctx, store, cfg, session, cwdOf).catch((err) =>
+          ctx.logger.warn('[dsh-persona-memory] background learning failed: %s', (err as Error | undefined)?.message ?? String(err)),
+        );
+      } else {
+        turnCounts.set(session.id, n);
       }
     } catch (err) {
       // containment: a hook bug must never break the session event fan-out
       ctx.logger.warn('[dsh-persona-memory] session/event hook error: %s', (err as Error | undefined)?.message ?? String(err));
     }
   });
-}
-
-/**
- * Last direct user text from the session surface (for the correction entry).
- */
-function lastDirectUserText(session: Session): string {
-  const events = sessionEvents(session);
-  for (let i = events.length - 1; i >= 0; i--) {
-    const event = events[i] as
-      | {
-          type?: string;
-          data?: {
-            source?: { kind?: string };
-            content?: readonly { type: string; text?: string }[];
-          };
-        }
-      | undefined;
-    if (event?.type === 'user/message' && event.data?.source?.kind === 'user') {
-      return (
-        event.data.content
-          ?.filter((b) => b.type === 'text')
-          .map((b) => b.text ?? '')
-          .join(' ')
-          .trim() ?? ''
-      );
-    }
-  }
-  return '';
-}
-
-/**
- * Persist one correction as failure memory (category `correction`). Called from
- * the /correct command (explicit user intent) and from in-chat pattern
- * detection (rate-limited). Deduped; overflow/conflict drops the entry.
- */
-export async function saveCorrection(
-  store: MemoryStore,
-  cfg: LearningConfig,
-  text: string,
-  source: 'command' | 'pattern' = 'pattern',
-  logger?: { info: (format: string, ...param: unknown[]) => void },
-): Promise<void> {
-  // Corrections are captured as failure memory (category correction) — they
-  // surface in the injected recent-failures block so the model learns from
-  // them, and stay out of MEMORY.md unless promoted by an explicit add.
-  const entry = buildFailureText(text, { category: 'correction' });
-  if (cfg.enableSecretScanning && scanContent(entry)) {
-    logger?.info('[dsh-persona-memory] correction (%s) blocked by scanner: %s', source, text.slice(0, 80));
-    return;
-  }
-  const result = await store.add('failure', entry, { dedupe: true });
-  if (!result.overflow && !result.conflict) {
-    logger?.info('[dsh-persona-memory] correction (%s) saved: %s', source, text.replace(/\s+/g, ' ').slice(0, 80));
-    return;
-  }
-  // Over budget or a concurrent external write — the correction simply does
-  // not land this time; consolidation of failure memory is rare and the
-  // failure block only injects the most recent entries anyway.
-  logger?.info('[dsh-persona-memory] correction (%s) skipped (overflow/conflict): %s', source, entry.slice(0, 80));
 }
 
 async function runLearning(

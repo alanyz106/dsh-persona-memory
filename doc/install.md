@@ -53,7 +53,7 @@ dsh --profile web
 
 ## 升级不会重置配置
 
-插件配置不在包里，而在 profile 的用户层文件 `~/.dsh/profiles/<profile>/cordis.patch.yml` 的 `persona-memory` 段。包内 `cordis.patch.yml` 只有激活行、没有 `config:`，因此 `remove` + `add` 不会覆盖你的设置；同理 `MEMORY.md`、`USER.md`、`failures.md`、`STANDING.md` 与仓库里的 `AGENTS.md` / `memory/` 也都不在包内。
+插件配置不在包里，而在 profile 的用户层文件 `~/.dsh/profiles/<profile>/cordis.patch.yml` 的 `persona-memory` 段。包内 `cordis.patch.yml` 只有激活行、没有 `config:`，因此 `remove` + `add` 不会覆盖你的设置；同理 `MEMORY.md`、`USER.md`、`STANDING.md` 与仓库里的 `AGENTS.md` / `memory/` 也都不在包内。
 
 升级前想保险可以先备份：
 

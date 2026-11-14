@@ -25,7 +25,6 @@ const globalStore = createMemoryStore({ dir: testDir });
 registerMemoryTool(toolCtx, globalStore, {
   memoryCharLimit: 5000,
   userCharLimit: 8000,
-  failureCharLimit: 10000,
   enableSecretScanning: true,
   usageNudgeThreshold: 0.9,
   autoConsolidate: false,

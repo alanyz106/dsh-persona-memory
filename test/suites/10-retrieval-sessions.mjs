@@ -108,17 +108,17 @@ check('injection stays on when human-only is off', allowsInjection({ injectHuman
 check('sessionOf reads the assembly context', sessionOf({ agent: { session: { header: { origin: 'subagent' } } } })?.header?.origin === 'subagent');
 
 const derivedPolicy = sessionCapturePolicy(
-  { learnEnabled: true, correctionDetection: true, learnHumanOnly: true, correctionHumanOnly: true },
+  { learnEnabled: true, learnHumanOnly: true },
   { header: { parentSession: 'p' } },
 );
-check('derived session skips learning and corrections', derivedPolicy.learning === false && derivedPolicy.corrections === false);
+check('derived session skips learning', derivedPolicy.learning === false);
 const humanPolicy = sessionCapturePolicy(
-  { learnEnabled: true, correctionDetection: true, learnHumanOnly: true, correctionHumanOnly: true },
+  { learnEnabled: true, learnHumanOnly: true },
   { header: { cwd: 'E:/repo' } },
 );
-check('human session keeps learning and corrections', humanPolicy.learning === true && humanPolicy.corrections === true);
+check('human session keeps learning', humanPolicy.learning === true);
 const permissivePolicy = sessionCapturePolicy(
-  { learnEnabled: true, correctionDetection: true, learnHumanOnly: false, correctionHumanOnly: false },
+  { learnEnabled: true, learnHumanOnly: false },
   { header: { origin: 'subagent' } },
 );
-check('capture policy can opt derived sessions back in', permissivePolicy.learning === true && permissivePolicy.corrections === true);
+check('capture policy can opt derived sessions back in', permissivePolicy.learning === true);

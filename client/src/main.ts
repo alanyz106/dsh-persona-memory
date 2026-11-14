@@ -254,6 +254,7 @@ const ACTION_LABELS: Record<string, string> = {
   backup: '立即备份',
   restoreLatest: '恢复备份',
   configSave: '保存配置',
+  prune: '清理旧条目',
 };
 
 function actionLabel(action: string): string {
@@ -319,6 +320,14 @@ function fmtStamp(iso: string): string {
   if (Number.isNaN(d.getTime())) return iso;
   const p = (n: number): string => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+/** Local calendar day for "N days ago" (`YYYY-MM-DD`, comparable to `created`). */
+function dayBefore(days: number): string {
+  const d = new Date();
+  d.setDate(d.getDate() - days);
+  const p = (n: number): string => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
 function input(value: unknown, onChange: (v: string) => void, placeholder?: string, disabled?: boolean): React.ReactElement {
@@ -498,6 +507,10 @@ function MemAdminPage(): React.ReactElement {
   const nextTaskId = React.useRef(0);
   const [editing, setEditing] = React.useState<EditingState | null>(null);
   const [confirmDel, setConfirmDel] = React.useState<EditingState | null>(null);
+  /** Inline "delete entries older than N days" draft (one store at a time). */
+  const [pruneDraft, setPruneDraft] = React.useState<{ which: string; days: string } | null>(null);
+  /** Second click: show the exact count before running the destructive prune. */
+  const [pruneConfirm, setPruneConfirm] = React.useState<{ which: string; days: number; count: number; cutoff: string } | null>(null);
   const [initialUi] = React.useState(loadUiState);
   const [projOpen, setProjOpen] = React.useState<string | null>(initialUi.projOpen);
   /** Resident block is collapsed by default: it is a reference panel, and
@@ -680,6 +693,8 @@ function MemAdminPage(): React.ReactElement {
       else setNotice((res && res.message) || '完成');
       setEditing(null);
       setConfirmDel(null);
+      setPruneDraft(null);
+      setPruneConfirm(null);
       setProjEdit(null);
       setProjResidentEdit(null);
       setProjCreate(null);
@@ -825,7 +840,7 @@ function MemAdminPage(): React.ReactElement {
   const standing = (state.standing || {}).instructions || [];
   const projects = state.projects || [];
   const backups = state.backups || [];
-  const whichName: Record<string, string> = { memory: 'MEMORY.md', user: 'USER.md', failure: 'failures.md' };
+  const whichName: Record<string, string> = { memory: 'MEMORY.md', user: 'USER.md' };
   const routeAvailable = state.llmRouteAvailable === true;
   // An active migration blocks every other action, even if this tab did not
   // start it (the host is single-flight).
@@ -888,7 +903,12 @@ function MemAdminPage(): React.ReactElement {
         );
       }
       return React.createElement('div', { key: which + i, style: { padding: '8px 0', borderBottom: '1px solid var(--dsw-alias-border-l1)', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 } },
-        React.createElement('div', { style: { flex: 1, minWidth: 0, fontSize: 13, lineHeight: 1.5, whiteSpace: 'pre-wrap', wordBreak: 'break-word' } }, entry.text),
+        React.createElement('div', { style: { flex: 1, minWidth: 0 } },
+          React.createElement('div', { style: { fontSize: 13, lineHeight: 1.5, whiteSpace: 'pre-wrap', wordBreak: 'break-word' } }, entry.text),
+          React.createElement('div', { style: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)', marginTop: 3 } },
+            `创建 ${entry.created || '-'} · 最近引用 ${entry.lastReferenced || '-'}`,
+          ),
+        ),
         React.createElement('div', { style: { display: 'flex', gap: 6, flexShrink: 0 } },
           actionBtn('编辑', () => setEditing({ which, index: i, text: String(entry.text || '') }), { style: { padding: '3px 8px', fontSize: 12 } }),
           actionBtn('删除', () => setConfirmDel({ which, index: i, text: String(entry.text || '') }), { style: { padding: '3px 8px', fontSize: 12 } }),
@@ -920,8 +940,52 @@ function MemAdminPage(): React.ReactElement {
     });
   };
 
+  /**
+   * Inline "delete entries older than N days" control for one store.
+   *
+   * Two steps on purpose: the draft only picks a cutoff, and the confirm shows
+   * the exact entry count before anything is written. The host snapshots the
+   * whole store into `<dir>/.trash/` before deleting, so this stays undoable.
+   */
+  const pruneControl = (which: string): React.ReactNode => {
+    const list = (state.entries || {})[which] || [];
+    if (pruneDraft && pruneDraft.which === which) {
+      const days = Number(pruneDraft.days);
+      const valid = Number.isInteger(days) && days >= 1 && days <= 3650;
+      const cutoff = valid ? dayBefore(days) : '';
+      const count = valid ? list.filter((e) => String(e.created || '').slice(0, 10) < cutoff).length : 0;
+      return React.createElement('div', { style: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, marginTop: 6, fontSize: 13 } },
+        React.createElement('span', null, '删除创建于'),
+        input(pruneDraft.days, (v) => setPruneDraft({ which, days: v }), '天数'),
+        React.createElement('span', null, '天前的条目'),
+        React.createElement('span', { style: { color: 'var(--dsw-alias-label-secondary)', fontSize: 12 } },
+          valid ? `（created 早于 ${cutoff}：${count} 条）` : '（天数需为 1–3650 的整数）'),
+        actionBtn('下一步', () => {
+          if (!valid) { setNotice('天数需为 1–3650 的整数'); return; }
+          if (count === 0) { setNotice(`没有创建早于 ${cutoff} 的条目`); return; }
+          setPruneConfirm({ which, days, count, cutoff });
+          setPruneDraft(null);
+        }),
+        actionBtn('取消', () => setPruneDraft(null)),
+      );
+    }
+    if (pruneConfirm && pruneConfirm.which === which) {
+      return React.createElement('div', { style: { marginTop: 6, fontSize: 13 } },
+        React.createElement('div', { style: { color: 'var(--dsw-alias-state-warn-primary)', marginBottom: 6 } },
+          `确认删除 ${whichName[which]} 中创建早于 ${pruneConfirm.cutoff} 的 ${pruneConfirm.count} 条？删除前会自动在 .trash/ 留一份快照。`),
+        React.createElement('div', { style: { display: 'flex', gap: 8 } },
+          actionBtn('确认删除', () => mutate('prune', { which, days: pruneConfirm.days }), { style: { background: 'var(--dsw-alias-state-error-primary)', borderColor: 'transparent', color: '#fff' } }),
+          actionBtn('取消', () => setPruneConfirm(null)),
+        ),
+      );
+    }
+    return React.createElement('div', { style: { marginTop: 4 } },
+      actionBtn('清理旧条目', () => { setPruneDraft({ which, days: '30' }); setPruneConfirm(null); }, { style: { padding: '3px 8px', fontSize: 12 } }),
+    );
+  };
+
   const filesBody = (): React.ReactElement => React.createElement('div', null,
-    (['memory', 'user', 'failure'] as const).map((which) => {
+    (['memory', 'user'] as const).map((which) => {
       const info = st[which] || {};
       return React.createElement('div', { key: which, style: { padding: '8px 0', borderBottom: '1px solid var(--dsw-alias-border-l1)' } },
         React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 } },
@@ -931,6 +995,7 @@ function MemAdminPage(): React.ReactElement {
         ),
         meter(info.usagePct || 0),
         entryRows(which),
+        pruneControl(which),
       );
     }),
   );
@@ -1428,10 +1493,8 @@ function MemAdminPage(): React.ReactElement {
   const standingSummary = standing.length + ' 条' + ((state.standing || {}).chars ? ' · ' + (state.standing || {}).chars + ' 字符' : '');
   const memStore = st.memory || {};
   const usrStore = st.user || {};
-  const failStore = st.failure || {};
   const filesSummary = (memStore.exists ? 'MEMORY ' + memStore.usagePct + '%' : '') + ' · '
-    + (usrStore.exists ? 'USER ' + usrStore.usagePct + '%' : '') + ' · '
-    + (failStore.exists ? 'FAIL ' + failStore.usagePct + '%' : '');
+    + (usrStore.exists ? 'USER ' + usrStore.usagePct + '%' : '');
   const idxSummary = (idx.fts && idx.fts.exists ? 'FTS5 ' + fmtBytes(idx.fts.size) : 'FTS5 未生成') + ' · '
     + (idx.vector && idx.vector.exists ? '向量 ' + fmtBytes(idx.vector.size) : '向量未启用');
   const projectsSummary = projects.length + ' 个';

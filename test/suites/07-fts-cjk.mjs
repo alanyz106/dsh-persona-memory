@@ -5,7 +5,6 @@
  * queries matched nothing; the index therefore expands CJK queries to bigrams
  * and OR-joins terms.
  */
-import { buildFailureText } from '../../dist/lib/failures.js';
 import { createFtsIndex, buildFtsQuery } from '../../dist/lib/fts.js';
 import { check, shared, testDir } from '../harness.mjs';
 
@@ -13,11 +12,11 @@ const store = shared.store;
 const fts = createFtsIndex({ dir: testDir, enabled: true });
 
 await store.add('memory', 'fts-marker godot physics notes');
-await store.add('failure', buildFailureText('fts-marker tool crash', { category: 'tool-quirk' }), { dedupe: true });
+await store.add('user', 'fts-marker prefers tabs over spaces');
 const ftsHits = await fts.search(store, 'fts-marker', 'all', 10);
-check('fts mirrors entries from all stores', ftsHits !== null && ftsHits.length >= 2, JSON.stringify(ftsHits?.map((h) => h.which)));
-const ftsFiltered = await fts.search(store, 'fts-marker', 'failure', 10);
-check('fts respects which filter', ftsFiltered !== null && ftsFiltered.length === 1 && ftsFiltered[0].which === 'failure');
+check('fts mirrors entries from both stores', ftsHits !== null && ftsHits.length >= 2, JSON.stringify(ftsHits?.map((h) => h.which)));
+const ftsFiltered = await fts.search(store, 'fts-marker', 'user', 10);
+check('fts respects which filter', ftsFiltered !== null && ftsFiltered.length === 1 && ftsFiltered[0].which === 'user');
 const ftsMiss = await fts.search(store, 'zzz-no-such-token-zzz', 'all', 10);
 check('fts misses nonsense', ftsMiss !== null && ftsMiss.length === 0);
 const ftsQuote = await fts.search(store, 'say "hi"', 'all', 10);

@@ -1,6 +1,6 @@
 /**
  * The `memory_search` tool: search across the persistent persona memory
- * (MEMORY.md, USER.md, failures.md). Project-scoped memory lives in the
+ * (MEMORY.md, USER.md). Project-scoped memory lives in the
  * repository itself and is searched with `project_memory search`.
  *
  * Retrieval pipeline (most capable first):
@@ -69,7 +69,7 @@ export function registerMemorySearchTool(
     defineTool({
       name: 'memory_search',
       description:
-        'Search the persistent long-term persona memory (facts, preferences, conventions, failures, user profile) ' +
+        'Search the persistent long-term persona memory (facts, preferences, conventions, user profile) ' +
         'for entries related to `query`. Uses hybrid retrieval (full-text FTS5 + semantic vector ranking when enabled), ' +
         'else full-text ranking, else substring matching. ' +
         'For project-specific memory (AGENTS.md index + memory/*.md topics) use `project_memory search` instead.',
@@ -81,7 +81,7 @@ export function registerMemorySearchTool(
         },
         which: {
           type: 'string',
-          enum: ['memory', 'user', 'failure', 'all'],
+          enum: ['memory', 'user', 'all'],
           description: 'Where to search. Default: all.',
         },
       },
