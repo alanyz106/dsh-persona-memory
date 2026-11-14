@@ -11,7 +11,7 @@
  *   `lib/cjk-tokenizer.ts` for why: FTS5's default unicode61 tokenizer treats a
  *   Han run as a single token, so Chinese substring queries matched nothing.
  * - Rebuild is cheap (files are small) and driven by file-mtime staleness, so
- *   any write path (tool, learning, correction, consolidation) is picked up on
+ *   any write path (tool, learning, consolidation) is picked up on
  *   the next search without explicit invalidation hooks.
  * - `node:sqlite` is imported dynamically: if it is unavailable or the open
  *   fails, `available()` reports false and callers fall back to the substring
