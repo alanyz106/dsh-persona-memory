@@ -1193,7 +1193,7 @@ export function makeAdminRoutes(deps: AdminRouteDeps): WebRoute[] {
         const next = updateSectionConfig(content, 'persona-memory', cfgOut);
         writeRawAtomic(profilePatch, next);
         log(`admin: config saved to ${profilePatch}`);
-        writeJson(res, 200, { ok: true, message: '配置已保存，重启 web 后生效' });
+        writeJson(res, 200, { ok: true, message: '配置已保存，已热应用（约 2 秒生效，无需重启；若未生效再重启 web）' });
       } catch (e) {
         writeJson(res, 500, { error: e instanceof Error ? e.message : String(e) });
       }

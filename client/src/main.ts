@@ -1525,13 +1525,13 @@ function MemAdminPage(): React.ReactElement {
     }
     return React.createElement('div', null,
       React.createElement('div', { style: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)', padding: '8px 0' } },
-        '所有配置写回当前 profile 的 cordis.patch.yml（persona-memory 段），重启 web 后生效'),
+        '所有配置写回当前 profile 的 cordis.patch.yml（persona-memory 段），保存后约 2 秒热生效，无需重启 web'),
       groups,
       React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 12 } },
         // Default button look (no brand override): --dsw-alias-brand-primary is
         // undefined in the web shell, which rendered this CTA as a white blank.
         actionBtn('保存全部配置', saveConfig, { style: { fontWeight: 600 } }),
-        React.createElement('span', { style: { fontSize: 12, color: 'var(--dsw-alias-state-warn-primary)' } }, '保存后需重启 web 生效'),
+        React.createElement('span', { style: { fontSize: 12, color: 'var(--dsw-alias-state-warn-primary)' } }, '保存后约 2 秒热生效，无需重启'),
       ),
     );
   };
