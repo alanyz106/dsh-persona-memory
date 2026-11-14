@@ -36,7 +36,7 @@ const updResult = await registeredTool.execute(
   undefined,
 );
 check('tool update targets the global store', updResult.updated === true && updResult.which === 'memory', JSON.stringify(updResult));
-const globalReadBack = await globalStore.read('memory', 5000);
+const globalReadBack = await globalStore.read('memory');
 check('tool update applied to the global store', globalReadBack.content.includes('pnpm always'));
 
 // 15b. project_memory tool (AGENTS.md index + memory/ files)

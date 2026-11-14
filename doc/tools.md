@@ -2,8 +2,8 @@
 
 | 工具/命令 | 说明 | 详情 |
 |---|---|---|
-| `memory` | 全局记忆：`read` / `add` / `update` / `delete` / `rewrite`，`which` 选 `memory` / `user` | [disk-format.md](disk-format.md) |
-| `memory_search` | 全局记忆检索：`query` + 可选 `which`（`memory`/`user`/`all`）；FTS5 起底，开 `vectorEnabled` 后混合检索 | [vector-search.md](vector-search.md) |
+| `memory` | 全局记忆：`read`（返回全文）/ `add` / `update` / `delete` / `rewrite`，`which` 选 `memory` / `user` | [disk-format.md](disk-format.md) |
+| `memory_search` | 全局记忆检索：`query` + 可选 `which`（`memory`/`user`/`all`）；FTS5 起底，开 `vectorEnabled` 后混合检索。注入只带最近部分，更早的条目用它查 | [vector-search.md](vector-search.md) |
 | `project_memory` | 项目记忆：`list` / `read` / `write` / `append` / `update` / `delete` / `search` / `add_resident` / `remove_resident` / `migrate` / `guide`；作用域为当前项目 | [project-memory.md](project-memory.md) |
 | `/standing` | 列出 / `add <文本>` / `remove <n>` / `clear` 常驻指令；模型无写入口 | [standing.md](standing.md) |
 

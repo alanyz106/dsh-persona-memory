@@ -6,10 +6,8 @@
 import { HarnessError } from '@deepseek-ai/dsh-llm';
 import { defineTool, type ToolRunContext } from '@deepseek-ai/dsh-tools';
 import type { JsonValue } from './json-value.js';
-import { maybeConsolidate, type ConsolidationConfig } from './consolidate.js';
-import { latestRoute, type LlmRoute } from './llm-helper.js';
 import { scanContent } from './secret-scanner.js';
-import type { MemoryKind, MemoryStore } from './memory-store.js';
+import type { MemoryStore } from './memory-store.js';
 import type { Context } from '@deepseek-ai/cordis';
 
 /**
@@ -27,9 +25,7 @@ function logWrite(
   preview: string,
 ): void {
   const sessionId = (exec as { agent?: { id?: string } } | undefined)?.agent?.id ?? 'unknown-session';
-  const outcome = result.overflow
-    ? 'overflow-refused'
-    : result.conflict
+  const outcome = result.conflict
       ? 'conflict'
       : action === 'delete'
         ? (result.deleted ? 'deleted' : 'not-found')
@@ -46,15 +42,8 @@ function logWrite(
   );
 }
 
-export interface MemoryToolConfig extends ConsolidationConfig {
-  memoryCharLimit: number;
-  userCharLimit: number;
-  usageNudgeThreshold: number;
-}
-
-function limitFor(which: MemoryKind, config: { memoryCharLimit: number; userCharLimit: number }): number {
-  if (which === 'user') return config.userCharLimit;
-  return config.memoryCharLimit;
+export interface MemoryToolConfig {
+  enableSecretScanning: boolean;
 }
 
 export function registerMemoryTool(
@@ -116,22 +105,16 @@ export function registerMemoryTool(
             'MEMORY_INVALID_WHICH',
           );
         }
-        const limit = limitFor(which, config);
-        const label = which;
-
         let result: Record<string, unknown>;
         switch (args.action) {
           case 'read':
-            result = (await targetStore.read(which, limit)) as unknown as Record<string, unknown>;
+            result = (await targetStore.read(which)) as unknown as Record<string, unknown>;
             break;
           case 'add': {
             const entry = requireText(args.content, 'add');
             rejectBlocked(entry, config);
             result = (await targetStore.add(which, entry)) as unknown as Record<string, unknown>;
             logWrite(ctx, exec, 'add', which, result, entry);
-            if (result.overflow) {
-              result = await retryAfterConsolidation(args.action, entry, config, ctx, targetStore, routeFor(exec), which, limit);
-            }
             break;
           }
           case 'update': {
@@ -140,9 +123,6 @@ export function registerMemoryTool(
             rejectBlocked(entry, config);
             result = (await targetStore.update(which, match, entry)) as unknown as Record<string, unknown>;
             logWrite(ctx, exec, 'update', which, result, `${match} -> ${entry}`);
-            if (result.overflow) {
-              result = await retryAfterConsolidation(args.action, { content: entry, match }, config, ctx, targetStore, routeFor(exec), which, limit);
-            }
             break;
           }
           case 'delete': {
@@ -156,9 +136,6 @@ export function registerMemoryTool(
             rejectBlocked(content, config);
             result = (await targetStore.rewrite(which, content)) as unknown as Record<string, unknown>;
             logWrite(ctx, exec, 'rewrite', which, result, content);
-            if (result.overflow) {
-              result = await retryAfterConsolidation(args.action, content, config, ctx, targetStore, routeFor(exec), which, limit);
-            }
             break;
           }
           default:
@@ -170,20 +147,7 @@ export function registerMemoryTool(
             'MEMORY_WRITE_CONFLICT',
           );
         }
-        const used = withUsage(result, label, limit, config.usageNudgeThreshold);
-
-        // Over budget after a mutation? Fire an LLM consolidation in the
-        // background (hermes behavior: auto-consolidate instead of rejecting).
-        if (config.autoConsolidate && (args.action === 'add' || args.action === 'update' || args.action === 'rewrite') && (used.charCount as number) > limit && !used.consolidating) {
-          const route = routeFor(exec);
-          if (route) {
-            used.consolidating = true;
-            maybeConsolidate(ctx, targetStore, route, config, which).catch((err) =>
-              ctx.logger.warn('[dsh-persona-memory] consolidation trigger failed: %s', (err as Error | undefined)?.message ?? String(err)),
-            );
-          }
-        }
-        return used as unknown as Record<string, JsonValue>;
+        return result as unknown as Record<string, JsonValue>;
       },
     }),
   );
@@ -196,55 +160,6 @@ function requireText(value: unknown, action: string, field = 'content'): string 
   return value.trim();
 }
 
-function routeFor(exec: ToolRunContext): LlmRoute | undefined {
-  return exec.agent?.session ? latestRoute(exec.agent.session) : undefined;
-}
-
-type RetryPayload = string | { content: string; match: string };
-
-/**
- * A store mutation was refused because it would exceed the char limit
- * (hermes semantics: refuse, don't silently grow past capacity). When
- * auto-consolidate is enabled and the session has an LLM route, consolidate
- * the target FIRST (awaited — unlike the background nudge below) and retry the
- * mutation once against the freed space. If it is still over budget, surface
- * the capacity error so the model can merge/trim instead of looping forever.
- */
-async function retryAfterConsolidation(
-  action: 'add' | 'update' | 'rewrite',
-  payload: RetryPayload,
-  config: ConsolidationConfig,
-  ctx: Context,
-  targetStore: MemoryStore,
-  route: LlmRoute | undefined,
-  which: MemoryKind,
-  limit: number,
-): Promise<Record<string, unknown>> {
-  if (!config.autoConsolidate || !route) {
-    throw new HarnessError(
-      `Memory is at capacity (limit ${limit} chars). Consolidate first with a rewrite, or remove old entries, then retry.`,
-      'MEMORY_FULL',
-    );
-  }
-  await maybeConsolidate(ctx, targetStore, route, config, which);
-  let retried: Record<string, unknown>;
-  if (action === 'add') {
-    retried = (await targetStore.add(which, payload as string)) as unknown as Record<string, unknown>;
-  } else if (action === 'update') {
-    const { content, match } = payload as { content: string; match: string };
-    retried = (await targetStore.update(which, match, content)) as unknown as Record<string, unknown>;
-  } else {
-    retried = (await targetStore.rewrite(which, payload as string)) as unknown as Record<string, unknown>;
-  }
-  if (retried.overflow || retried.conflict) {
-    throw new HarnessError(
-      `Memory is still at capacity after consolidation (limit ${limit} chars). Merge or remove entries explicitly, then retry.`,
-      'MEMORY_FULL',
-    );
-  }
-  return { ...retried, consolidating: true };
-}
-
 function rejectBlocked(content: string, config: { enableSecretScanning: boolean }): void {
   if (!config.enableSecretScanning) return;
   const blocked = scanContent(content);
@@ -253,56 +168,25 @@ function rejectBlocked(content: string, config: { enableSecretScanning: boolean 
   }
 }
 
-/**
- * Attach usage reporting to every result (exported for testing).
- */
-export function withUsage(result: Record<string, unknown>, which: string, limit: number, nudgeThreshold: number): Record<string, unknown> {
-  const charCount = (result.charCount as number | undefined) ?? 0;
-  const pct = limit > 0 ? Math.min(100, Math.round((charCount / limit) * 100)) : 0;
-  return {
-    ...result,
-    which: which ?? result.which,
-    limit,
-    usagePct: pct,
-    nudge: pct >= nudgeThreshold * 100,
-  };
-}
 
 function formatResult(value: unknown): string {
   const v = value as Record<string, unknown>;
   if (v.content !== undefined && v.added === undefined && v.updated === undefined && v.deleted === undefined && v.rewritten === undefined) {
-    const usage = usageLine(v);
-    return usage ? `${v.content}\n\n${usage}` : String(v.content);
+    return String(v.content);
   }
   const whichStr = String(v.which ?? '');
   const file = `memory/${whichStr === 'user' ? 'USER.md' : 'MEMORY.md'}`;
-  let text: string;
-  if (v.added) text = `Saved to ${file}. Now ${v.entryCount} entries (${v.charCount} chars).`;
-  else if (v.updated !== undefined) {
-    text = v.updated
+  if (v.added) return `Saved to ${file}. Now ${v.entryCount} entries (${v.charCount} chars).`;
+  if (v.updated !== undefined) {
+    return v.updated
       ? `Updated ${file}. ${v.entryCount} entries, ${v.charCount} chars.`
       : `No entry in ${file} matched — nothing changed. Run read first to see exact text.`;
-  } else if (v.deleted !== undefined) {
-    text = v.deleted
+  }
+  if (v.deleted !== undefined) {
+    return v.deleted
       ? `Deleted from ${file}. ${v.entryCount} entries remain.`
       : `No entry in ${file} matched — nothing deleted.`;
-  } else if (v.rewritten) {
-    text = `Rewrote ${file}: ${v.entryCount} entries, ${v.charCount} chars.`;
-  } else {
-    return JSON.stringify(v);
   }
-  const usage = usageLine(v);
-  if (usage) text += `\n${usage}`;
-  return text;
-}
-
-function usageLine(v: Record<string, unknown>): string {
-  if (typeof v.usagePct !== 'number' || typeof v.limit !== 'number') return '';
-  let line = `Usage: ${v.usagePct}% (${v.charCount} chars / limit ${v.limit})`;
-  if (v.consolidating) {
-    line += ' — over budget, background consolidation triggered.';
-  } else if (v.nudge) {
-    line += ` — memory is nearly full; consider \`memory rewrite\` (action=rewrite) to consolidate older entries.`;
-  }
-  return line;
+  if (v.rewritten) return `Rewrote ${file}: ${v.entryCount} entries, ${v.charCount} chars.`;
+  return JSON.stringify(v);
 }

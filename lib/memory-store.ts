@@ -36,10 +36,6 @@ export function isEnoent(err: unknown): boolean {
 /** Same delimiter as pi-hermes-memory (src/constants.ts). */
 export const ENTRY_DELIMITER = '\n§\n';
 
-/** Char limits aligned with pi-hermes-memory (src/constants.ts). */
-export const DEFAULT_MEMORY_CHAR_LIMIT = 5000;
-export const DEFAULT_USER_CHAR_LIMIT = 5000;
-
 export type MemoryKind = 'memory' | 'user';
 
 export interface DecodedEntry {
@@ -55,8 +51,6 @@ export interface StoreAddResult {
   file: string;
   added: boolean;
   duplicate?: boolean;
-  overflow?: boolean;
-  limit?: number;
   entryCount: number;
   charCount: number;
 }
@@ -65,8 +59,6 @@ export interface StoreUpdateResult {
   which: MemoryKind;
   file: string;
   updated: boolean;
-  overflow?: boolean;
-  limit?: number;
   entryCount: number;
   charCount: number;
 }
@@ -83,8 +75,6 @@ export interface StoreRewriteResult {
   which: MemoryKind;
   file: string;
   rewritten: boolean;
-  overflow?: boolean;
-  limit?: number;
   entryCount: number;
   charCount: number;
 }
@@ -95,6 +85,25 @@ export interface StoreReadResult {
   exists: boolean;
   charCount: number;
   entryCount: number;
+  content: string;
+}
+
+/**
+ * The part of a store that fits in an injection window. Entries are taken from
+ * the END (newest first backwards) so older entries are the ones dropped; the
+ * newest entry is always included even when it alone exceeds the budget, and
+ * no entry is ever cut in half.
+ */
+export interface StoreWindowResult {
+  which: MemoryKind;
+  file: string;
+  exists: boolean;
+  /** full raw file size, metadata comments included */
+  charCount: number;
+  entryCount: number;
+  shownCount: number;
+  omittedCount: number;
+  /** shown entries' text, joined by a blank line */
   content: string;
 }
 
@@ -111,8 +120,9 @@ export interface MemoryStore {
   findEntry(which: MemoryKind, match: string): Promise<string | null>;
   remove(which: MemoryKind, match: string): Promise<StoreRemoveResult & { conflict?: boolean }>;
   rewrite(which: MemoryKind, content: string): Promise<StoreRewriteResult>;
-  read(which: MemoryKind, limit: number): Promise<StoreReadResult>;
-  readSync(which: MemoryKind, limit: number): StoreReadResult;
+  read(which: MemoryKind): Promise<StoreReadResult>;
+  /** Tail of the store that fits `budget` characters (0 = everything). */
+  windowSync(which: MemoryKind, budget: number): StoreWindowResult;
   readRawSync(which: MemoryKind): string[];
   search(query: string, which: MemoryKind | 'all', maxResults: number): Promise<StoreSearchHit[]>;
   stat(which: MemoryKind): Promise<{ exists: boolean; entryCount: number }>;
@@ -183,17 +193,10 @@ function normalizeContent(text: string): string {
 
 export interface MemoryStoreConfig {
   dir: string;
-  limits?: { memory?: number; user?: number };
 }
 
 export function createMemoryStore(config: MemoryStoreConfig): MemoryStore {
   const dir = config.dir;
-  const limits = config.limits ?? {};
-
-  function charLimitFor(which: MemoryKind): number {
-    if (which === 'user') return limits.user ?? DEFAULT_USER_CHAR_LIMIT;
-    return limits.memory ?? DEFAULT_MEMORY_CHAR_LIMIT;
-  }
 
   /** per-file write chains */
   const queues = new Map<string, Promise<unknown>>();
@@ -366,14 +369,9 @@ export function createMemoryStore(config: MemoryStoreConfig): MemoryStore {
   /** Append one entry, refusing the write when it would exceed the char limit. */
   async function add(which: MemoryKind, content: string): Promise<StoreAddResult & { conflict?: boolean }> {
     const file = fileFor(which);
-    const limit = charLimitFor(which);
     return mutate<StoreAddResult>(file, (entries) => {
       const t = today();
       const next = [...entries, encodeEntry(normalizeContent(content), t, t, null)];
-      if (charCount(next) > limit) {
-        // Refuse the write at capacity; the tool layer may auto-consolidate and retry.
-        return { value: { which, file, added: false, overflow: true, limit, entryCount: entries.length, charCount: charCount(entries) } };
-      }
       return { next, value: { which, file, added: true, entryCount: next.length, charCount: charCount(next) } };
     });
   }
@@ -395,7 +393,6 @@ export function createMemoryStore(config: MemoryStoreConfig): MemoryStore {
    */
   async function update(which: MemoryKind, match: string, content: string): Promise<StoreUpdateResult & { conflict?: boolean }> {
     const file = fileFor(which);
-    const limit = charLimitFor(which);
     return mutate<StoreUpdateResult>(file, (entries) => {
       const list = decoded(entries);
       const index = list.findIndex((e) => e.text.toLowerCase().includes(match.toLowerCase()));
@@ -405,9 +402,6 @@ export function createMemoryStore(config: MemoryStoreConfig): MemoryStore {
       const t = today();
       list[index] = { text: normalizeContent(content), created: list[index].created, lastReferenced: t, project: list[index].project };
       const next = encoded(list);
-      if (charCount(next) > limit) {
-        return { value: { which, file, updated: false, overflow: true, limit, entryCount: entries.length, charCount: charCount(entries) } };
-      }
       return { next, value: { which, file, updated: true, entryCount: next.length, charCount: charCount(next) } };
     });
   }
@@ -452,33 +446,30 @@ export function createMemoryStore(config: MemoryStoreConfig): MemoryStore {
           return encodeEntry(decodedEntry.text, decodedEntry.created, decodedEntry.lastReferenced, decodedEntry.project);
         })
       : [encodeEntry(normalizeContent(trimmed), today(), today())];
-    const limit = charLimitFor(which);
-    if (charCount(entries) > limit) {
-      return { which, file, rewritten: false, overflow: true, limit, entryCount: entries.length, charCount: charCount(entries) };
-    }
     await writeEntries(file, entries);
     return { which, file, rewritten: true, entryCount: entries.length, charCount: charCount(entries) };
   }
 
-  async function read(which: MemoryKind, limit: number): Promise<StoreReadResult> {
+  async function read(which: MemoryKind): Promise<StoreReadResult> {
     const file = fileFor(which);
     const entries = await readEntries(file);
     const list = decoded(entries);
-    const content = list.map((e) => e.text).join('\n\n');
     return {
       which,
       file,
       exists: entries.length > 0,
       charCount: charCount(entries),
       entryCount: entries.length,
-      content: truncate(content, limit),
+      content: list.map((e) => e.text).join('\n\n'),
     };
   }
 
   /**
-   * Synchronous read for the per-request prompt variable (small files).
+   * Synchronous tail read for the per-request prompt variable (small files).
+   * The newest entries win: older ones are omitted rather than truncating an
+   * entry mid-way. `budget <= 0` means "the whole store".
    */
-  function readSync(which: MemoryKind, limit: number): StoreReadResult {
+  function windowSync(which: MemoryKind, budget: number): StoreWindowResult {
     const file = fileFor(which);
     let raw = '';
     try {
@@ -487,14 +478,17 @@ export function createMemoryStore(config: MemoryStoreConfig): MemoryStore {
       if (!isEnoent(err)) throw err;
     }
     const list = parseEntries(raw).map(decodeEntry);
-    const content = list.map((e) => e.text).join('\n\n');
+    const start = windowStartIndex(list, budget);
+    const shown = list.slice(start);
     return {
       which,
       file,
       exists: list.length > 0,
       charCount: raw.length,
       entryCount: list.length,
-      content: truncate(content, limit),
+      shownCount: shown.length,
+      omittedCount: start,
+      content: shown.map((e) => e.text).join('\n\n'),
     };
   }
 
@@ -524,13 +518,27 @@ export function createMemoryStore(config: MemoryStoreConfig): MemoryStore {
     return { exists: entries.length > 0, entryCount: entries.length };
   }
 
-  return { add, update, findEntry, remove, rewrite, read, readSync, readRawSync, search, stat, fileFor, listRaw, replaceEntries };
+  return { add, update, findEntry, remove, rewrite, read, windowSync, readRawSync, search, stat, fileFor, listRaw, replaceEntries };
 }
 
 /**
- * @returns text truncated to ~limit chars with a marker
+ * First index of the newest suffix that fits `budget` characters.
+ *
+ * Entries are measured by their TEXT length plus the "\n\n" join overhead.
+ * The newest entry is always included even when it alone is over budget (never
+ * cut an entry in half); `budget <= 0` means "keep everything".
+ *
+ * (exported for the admin page's "which entries are actually injected" marker)
  */
-export function truncate(text: string, limit: number): string {
-  if (text.length <= limit) return text;
-  return text.slice(0, Math.max(0, limit - 40)) + '\n…[truncated — use memory_search for full entries]';
+export function windowStartIndex(list: DecodedEntry[], budget: number): number {
+  if (budget <= 0) return 0;
+  let total = 0;
+  let start = list.length;
+  for (let i = list.length - 1; i >= 0; i--) {
+    const extra = list[i].text.length + (start < list.length ? 2 : 0);
+    if (start < list.length && total + extra > budget) break;
+    total += extra;
+    start = i;
+  }
+  return start;
 }

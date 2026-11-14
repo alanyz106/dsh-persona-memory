@@ -23,6 +23,8 @@ interface EntryItem {
   text: string;
   created: string;
   project: string | null;
+  /** Whether this entry falls inside the injection window (newest ones do). */
+  inInjectionWindow?: boolean;
 }
 
 interface SchemaFieldClient {
@@ -44,7 +46,7 @@ interface StatusPayload {
   backups: BackupSnapshot[];
   /** How many dated snapshots are retained (`backupKeep`; 0 = latest-only). */
   backupKeep?: number;
-  stores: Record<string, { exists: boolean; entries: number; chars: number; usagePct: number }>;
+  stores: Record<string, { exists: boolean; entries: number; chars: number }>;
   standing: { exists: boolean; instructions: string[]; chars: number };
   indexes: { fts: { exists: boolean; size: number }; vector: { exists: boolean; size: number } };
   models: { dir: string; models: Array<{ name: string }> };
@@ -254,6 +256,7 @@ const ACTION_LABELS: Record<string, string> = {
   restoreLatest: '恢复备份',
   configSave: '保存配置',
   prune: '清理旧条目',
+  consolidate: '整理记忆',
 };
 
 function actionLabel(action: string): string {
@@ -510,6 +513,8 @@ function MemAdminPage(): React.ReactElement {
   const [pruneDraft, setPruneDraft] = React.useState<{ which: string; days: string } | null>(null);
   /** Second click: show the exact count before running the destructive prune. */
   const [pruneConfirm, setPruneConfirm] = React.useState<{ which: string; days: number; count: number; cutoff: string } | null>(null);
+  const [olderOpen, setOlderOpen] = React.useState<Record<string, boolean>>({});
+  const [consolidateConfirm, setConsolidateConfirm] = React.useState<string | null>(null);
   const [initialUi] = React.useState(loadUiState);
   const [projOpen, setProjOpen] = React.useState<string | null>(initialUi.projOpen);
   /** Resident block is collapsed by default: it is a reference panel, and
@@ -694,6 +699,7 @@ function MemAdminPage(): React.ReactElement {
       setConfirmDel(null);
       setPruneDraft(null);
       setPruneConfirm(null);
+      setConsolidateConfirm(null);
       setProjEdit(null);
       setProjResidentEdit(null);
       setProjCreate(null);
@@ -875,45 +881,69 @@ function MemAdminPage(): React.ReactElement {
     );
   };
 
+  /** One memory entry: text, created date, edit/delete actions. */
+  const entryRow = (which: string, entry: EntryItem, i: number): React.ReactNode => {
+    const isEditing = editing && editing.which === which && editing.index === i;
+    const isConfirm = confirmDel && confirmDel.which === which && confirmDel.index === i;
+    if (isEditing) {
+      return React.createElement('div', { key: which + i, style: { padding: '8px 0', borderBottom: '1px solid var(--dsw-alias-border-l1)' } },
+        React.createElement(TextArea, { value: editing.text, onChange: (v) => setEditing({ which, index: i, text: v }), placeholder: '条目内容', disabled: locked }),
+        React.createElement('div', { style: { display: 'flex', gap: 8, marginTop: 6 } },
+          actionBtn('保存', () => mutate('update', { which, index: i, text: editing.text })),
+          actionBtn('取消', () => setEditing(null)),
+        ),
+      );
+    }
+    if (isConfirm) {
+      return React.createElement('div', { key: which + i, style: { padding: '8px 0', borderBottom: '1px solid var(--dsw-alias-border-l1)' } },
+        React.createElement('div', { style: { color: 'var(--dsw-alias-state-warn-primary)', fontSize: 13, marginBottom: 6 } }, '确认删除这条记忆？'),
+        React.createElement('div', { style: { display: 'flex', gap: 8 } },
+          actionBtn('删除', () => mutate('delete', { which, index: i }), { style: { background: 'var(--dsw-alias-state-error-primary)', borderColor: 'transparent', color: '#fff' } }),
+          actionBtn('取消', () => setConfirmDel(null)),
+        ),
+      );
+    }
+    return React.createElement('div', { key: which + i, style: { padding: '8px 0', borderBottom: '1px solid var(--dsw-alias-border-l1)', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 } },
+      React.createElement('div', { style: { flex: 1, minWidth: 0 } },
+        React.createElement('div', { style: { fontSize: 13, lineHeight: 1.5, whiteSpace: 'pre-wrap', wordBreak: 'break-word' } }, entry.text),
+        React.createElement('div', { style: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)', marginTop: 3 } },
+          `创建 ${entry.created || '-'}`,
+        ),
+      ),
+      React.createElement('div', { style: { display: 'flex', gap: 6, flexShrink: 0 } },
+        actionBtn('编辑', () => setEditing({ which, index: i, text: String(entry.text || '') }), { style: { padding: '3px 8px', fontSize: 12 } }),
+        actionBtn('删除', () => setConfirmDel({ which, index: i, text: String(entry.text || '') }), { style: { padding: '3px 8px', fontSize: 12 } }),
+      ),
+    );
+  };
+
+  /**
+   * Entries shown split by the injection window: the ones the model actually
+   * sees come first, older ones live behind a disclosure so the page still
+   * exposes the whole file without implying it is all injected.
+   */
   const entryRows = (which: string): React.ReactNode => {
     const list = (state.entries || {})[which] || [];
     if (list.length === 0) {
       return React.createElement('div', { style: { fontSize: 13, color: 'var(--dsw-alias-label-secondary)', padding: '6px 0' } }, '（无条目）');
     }
-    return list.map((entry, i) => {
-      const isEditing = editing && editing.which === which && editing.index === i;
-      const isConfirm = confirmDel && confirmDel.which === which && confirmDel.index === i;
-      if (isEditing) {
-        return React.createElement('div', { key: which + i, style: { padding: '8px 0', borderBottom: '1px solid var(--dsw-alias-border-l1)' } },
-          React.createElement(TextArea, { value: editing.text, onChange: (v) => setEditing({ which, index: i, text: v }), placeholder: '条目内容', disabled: locked }),
-          React.createElement('div', { style: { display: 'flex', gap: 8, marginTop: 6 } },
-            actionBtn('保存', () => mutate('update', { which, index: i, text: editing.text })),
-            actionBtn('取消', () => setEditing(null)),
-          ),
-        );
-      }
-      if (isConfirm) {
-        return React.createElement('div', { key: which + i, style: { padding: '8px 0', borderBottom: '1px solid var(--dsw-alias-border-l1)' } },
-          React.createElement('div', { style: { color: 'var(--dsw-alias-state-warn-primary)', fontSize: 13, marginBottom: 6 } }, '确认删除这条记忆？'),
-          React.createElement('div', { style: { display: 'flex', gap: 8 } },
-            actionBtn('删除', () => mutate('delete', { which, index: i }), { style: { background: 'var(--dsw-alias-state-error-primary)', borderColor: 'transparent', color: '#fff' } }),
-            actionBtn('取消', () => setConfirmDel(null)),
-          ),
-        );
-      }
-      return React.createElement('div', { key: which + i, style: { padding: '8px 0', borderBottom: '1px solid var(--dsw-alias-border-l1)', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 } },
-        React.createElement('div', { style: { flex: 1, minWidth: 0 } },
-          React.createElement('div', { style: { fontSize: 13, lineHeight: 1.5, whiteSpace: 'pre-wrap', wordBreak: 'break-word' } }, entry.text),
-          React.createElement('div', { style: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)', marginTop: 3 } },
-            `创建 ${entry.created || '-'}`,
-          ),
-        ),
-        React.createElement('div', { style: { display: 'flex', gap: 6, flexShrink: 0 } },
-          actionBtn('编辑', () => setEditing({ which, index: i, text: String(entry.text || '') }), { style: { padding: '3px 8px', fontSize: 12 } }),
-          actionBtn('删除', () => setConfirmDel({ which, index: i, text: String(entry.text || '') }), { style: { padding: '3px 8px', fontSize: 12 } }),
-        ),
-      );
-    });
+    const visible: Array<{ entry: EntryItem; index: number }> = [];
+    const older: Array<{ entry: EntryItem; index: number }> = [];
+    list.forEach((entry, index) => (entry.inInjectionWindow === false ? older : visible).push({ entry, index }));
+    const openOlder = olderOpen[which] === true;
+    return React.createElement('div', null,
+      visible.map(({ entry, index }) => entryRow(which, entry, index)),
+      older.length
+        ? React.createElement('div', { key: 'older-' + which, style: { marginTop: 4 } },
+            actionBtn(
+              `${openOlder ? '收起' : '展开'}更早的 ${older.length} 条记忆（不注入提示词，仍然保存、可搜索）`,
+              () => setOlderOpen(Object.assign({}, olderOpen, { [which]: !openOlder })),
+              { style: { padding: '3px 8px', fontSize: 12 } },
+            ),
+            openOlder ? older.map(({ entry, index }) => entryRow(which, entry, index)) : null,
+          )
+        : null,
+    );
   };
 
   const standingRows = (): React.ReactNode => {
@@ -946,6 +976,23 @@ function MemAdminPage(): React.ReactElement {
    * the exact entry count before anything is written. The host snapshots the
    * whole store into `<dir>/.trash/` before deleting, so this stays undoable.
    */
+  /** Manual merge: rewrites the file only when the result is strictly smaller. */
+  const consolidateControl = (which: string): React.ReactNode => {
+    if (consolidateConfirm === which) {
+      return React.createElement('div', { style: { marginTop: 6, fontSize: 13 } },
+        React.createElement('div', { style: { color: 'var(--dsw-alias-state-warn-primary)', marginBottom: 6 } },
+          `确认用模型整理 ${whichName[which]}？会合并相似条目、保留偏好与「用户纠正」条目；只有结果更小且通过扫描才写入，原文件可事后从备份恢复。`),
+        React.createElement('div', { style: { display: 'flex', gap: 8 } },
+          actionBtn('确认整理', () => mutate('consolidate', { which })),
+          actionBtn('取消', () => setConsolidateConfirm(null)),
+        ),
+      );
+    }
+    return React.createElement('div', { style: { marginTop: 4 } },
+      actionBtn('整理记忆（合并相似条目）', () => setConsolidateConfirm(which), { style: { padding: '3px 8px', fontSize: 12 } }),
+    );
+  };
+
   const pruneControl = (which: string): React.ReactNode => {
     const list = (state.entries || {})[which] || [];
     if (pruneDraft && pruneDraft.which === which) {
@@ -990,10 +1037,10 @@ function MemAdminPage(): React.ReactElement {
         React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 } },
           React.createElement('span', { style: { fontWeight: 600, minWidth: 96 } }, whichName[which]),
           React.createElement('span', { style: { color: 'var(--dsw-alias-label-secondary)' } },
-            info.exists ? `${info.entries} 条 · ${info.chars} 字符 · ${info.usagePct}%` : '文件不存在'),
+            info.exists ? `${info.entries} 条 · ${info.chars} 字符（仅最近部分注入提示词）` : '文件不存在'),
         ),
-        meter(info.usagePct || 0),
         entryRows(which),
+        consolidateControl(which),
         pruneControl(which),
       );
     }),
@@ -1492,8 +1539,8 @@ function MemAdminPage(): React.ReactElement {
   const standingSummary = standing.length + ' 条' + ((state.standing || {}).chars ? ' · ' + (state.standing || {}).chars + ' 字符' : '');
   const memStore = st.memory || {};
   const usrStore = st.user || {};
-  const filesSummary = (memStore.exists ? 'MEMORY ' + memStore.usagePct + '%' : '') + ' · '
-    + (usrStore.exists ? 'USER ' + usrStore.usagePct + '%' : '');
+  const filesSummary = (memStore.exists ? 'MEMORY ' + memStore.entries + ' 条' : 'MEMORY 缺失') + ' · '
+    + (usrStore.exists ? 'USER ' + usrStore.entries + ' 条' : 'USER 缺失');
   const idxSummary = (idx.fts && idx.fts.exists ? 'FTS5 ' + fmtBytes(idx.fts.size) : 'FTS5 未生成') + ' · '
     + (idx.vector && idx.vector.exists ? '向量 ' + fmtBytes(idx.vector.size) : '向量未启用');
   const projectsSummary = projects.length + ' 个';

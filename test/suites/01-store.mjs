@@ -14,10 +14,10 @@ const store = createMemoryStore({ dir: testDir, limits: BIG_LIMITS });
 shared.store = store;
 
 // 1. read both files against the REAL hermes format
-const mem = await store.read('memory', 5000);
+const mem = await store.read('memory');
 check('memory read parses entries', mem.entryCount > 0, `entries=${mem.entryCount} chars=${mem.charCount}`);
 check('memory read returns content', mem.content.length > 0);
-const user = await store.read('user', 8000);
+const user = await store.read('user');
 check('user read parses entries', user.entryCount > 0, `entries=${user.entryCount}`);
 // shared-content assertion only meaningful when the real Pi files were copied
 check('user content mentions the shared profile marker', !hasRealFiles || user.content.includes('莲'), 'shared USER.md content visible');
@@ -48,7 +48,7 @@ check('delete removes entry', del.deleted === true && del.entryCount === before)
 const doc = `fact one <!-- created=2026-01-01, last=2026-01-01 -->${ENTRY_DELIMITER}fact two <!-- created=2026-01-02, last=2026-01-02 -->`;
 const rw = await store.rewrite('memory', doc);
 check('rewrite parses hermes doc', rw.entryCount === 2, `entries=${rw.entryCount}`);
-const back = await store.read('memory', 5000);
+const back = await store.read('memory');
 check('rewrite round-trip readable', back.entryCount === 2 && back.content.includes('fact one'));
 const rawAfterRw = await store.readRawSync('memory');
 check('rewrite keeps created/last metadata intact',
@@ -61,7 +61,7 @@ check('rewrite keeps created/last metadata intact',
 // all memory into one unformatted entry with no metadata comment).
 const stray = await store.rewrite('memory', 'plain fact about towers \u00a7 one stray glyph');
 check('rewrite stray glyph stays single entry', stray.entryCount === 1, `entries=${stray.entryCount}`);
-const strayBack = await store.read('memory', 5000);
+const strayBack = await store.read('memory');
 check('rewrite stray glyph keeps metadata', strayBack.entryCount === 1 && /<!-- created=\d{4}-\d{2}-\d{2}/.test(await store.readRawSync('memory')), JSON.stringify(strayBack));
 
 // 4c. rewrite with a hermes doc whose entries start with the delimiter glyph

@@ -19,7 +19,7 @@ node test/admin-fence.mjs               # 管理接口 loopback 围栏
 | 套件 | 覆盖 |
 |---|---|
 | `01-store` | 全局存储读写、search、rewrite 与 § 分隔符回归 |
-| `02-scanner-standing` | 内容扫描、用量提示、事实解析、常驻指令、自动合并 |
+| `02-scanner-standing` | 内容扫描、事实解析、常驻指令、手动整理提示词 |
 | `04-project-memory` | 项目根探测、路径安全闸门、索引解析、主题文件 IO、预算、注册表、目录扫描 |
 | `05-migration-planner` | 迁移计划解析与全部校验闸门、提示词（指南 + 宽主题 few-shot） |
 | `07-fts-cjk` | FTS5 镜像、OR 查询、注入安全、CJK bigram 检索、降级 |

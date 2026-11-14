@@ -1,9 +1,11 @@
 /**
- * Auto-consolidation — when a store exceeds its char limit, call the session's
- * own LLM route to merge/age the entries, and commit ONLY when the result is
+ * Manual consolidation — the admin page's「整理记忆」button asks the session's
+ * own LLM route to merge related entries, and commits ONLY when the result is
  * strictly smaller, fully parseable, and passes the content scanner (hermes's
  * "refreshed < current" safety rule). A failed consolidation never corrupts
- * memory: it just leaves the store over budget and logs a warning.
+ * memory. It never runs automatically: stores have no hard size cap, so
+ * nothing forces a merge and old entries are never deleted behind the user's
+ * back.
  *
  * The prompt never reasons about time: `created` is carried through only as
  * bookkeeping (the admin page's prune window reads it). Consolidation is
@@ -19,43 +21,44 @@ import type { Context } from '@deepseek-ai/cordis';
 const inflight = new Set<string>();
 
 export interface ConsolidationConfig {
-  memoryCharLimit: number;
-  userCharLimit: number;
-  projectCharLimit?: number;
   enableSecretScanning: boolean;
-  autoConsolidate: boolean;
   consolidateTimeoutMs: number;
 }
 
+export interface ConsolidationResult {
+  ran: boolean;
+  reason?: string;
+  beforeEntries?: number;
+  afterEntries?: number;
+  beforeChars?: number;
+  afterChars?: number;
+}
+
 /**
- * Trigger consolidation for one store when it is over its char limit.
- * Fire-and-forget from callers; never throws.
- * @param limitOverride explicit char limit (project stores use projectCharLimit)
+ * Run one manual consolidation pass. Never throws; returns why it declined.
  */
-export async function maybeConsolidate(
+export async function consolidateStore(
   ctx: Context,
   store: MemoryStore,
   route: LlmRoute,
   cfg: ConsolidationConfig,
   which: 'memory' | 'user',
-  limitOverride?: number,
-): Promise<{ ran: boolean; reason?: string }> {
+): Promise<ConsolidationResult> {
   // Key the in-flight guard by the store's own file path + which, so the
   // global store and every project store consolidate independently.
   const key = `${store.fileFor(which)}:${which}`;
-  if (!cfg.autoConsolidate || inflight.has(key)) return { ran: false, reason: 'disabled-or-inflight' };
+  if (inflight.has(key)) return { ran: false, reason: 'inflight' };
   inflight.add(key);
   try {
     const raw = await store.listRaw(which);
     if (raw.length === 0) return { ran: false, reason: 'empty' };
-    const currentChars = raw.join(ENTRY_DELIMITER).length;
-    const limit = limitOverride ?? (which === 'user' ? cfg.userCharLimit : cfg.memoryCharLimit);
-    if (currentChars <= limit) return { ran: false, reason: 'under-limit' };
+    const beforeChars = raw.join(ENTRY_DELIMITER).length;
 
     // The model sees entry TEXT only: dates/tags are never injected into a
     // prompt and never influence the merge. Metadata is re-attached locally.
     const texts = raw.map((line) => decodeEntry(line).text);
-    const prompt = buildConsolidationPrompt(texts, limit);
+    if (texts.length < 2) return { ran: false, reason: 'too-few-entries' };
+    const prompt = buildConsolidationPrompt(texts);
     const reply = await callLlm(ctx, route, CONSOLIDATION_SYSTEM_PROMPT, prompt, cfg.consolidateTimeoutMs);
     const entries = parseConsolidatedOutput(reply);
     const check = validateConsolidation(texts, entries, cfg);
@@ -66,9 +69,15 @@ export async function maybeConsolidate(
     await store.replaceEntries(which, nextRaw);
     ctx.logger.info(
       '[dsh-persona-memory] consolidated %s: %d → %d entries, %d → %d chars',
-      which, texts.length, check.entries.length, currentChars, check.chars,
+      which, texts.length, check.entries.length, beforeChars, nextRaw.join(ENTRY_DELIMITER).length,
     );
-    return { ran: true };
+    return {
+      ran: true,
+      beforeEntries: texts.length,
+      afterEntries: check.entries.length,
+      beforeChars,
+      afterChars: nextRaw.join(ENTRY_DELIMITER).length,
+    };
   } catch (err) {
     ctx.logger.warn('[dsh-persona-memory] consolidation failed: %s', (err as Error | undefined)?.message ?? String(err));
     return { ran: false, reason: 'error' };
@@ -79,7 +88,7 @@ export async function maybeConsolidate(
 
 const CONSOLIDATION_SYSTEM_PROMPT = `You are a memory consolidator for a coding agent's persistent long-term memory.
 
-The memory store is over its character budget. Rewrite its entries so that they fit:
+The user asked to consolidate this memory store. Rewrite its entries:
 - Merge entries that are about the same subject into one concise, self-contained entry.
 - Preserve every user preference and correction. They have the highest priority and must never be dropped or weakened.
 - Entries that begin with \`用户纠正：\` are corrections the user gave you. Never drop them or fold them into a general fact entry; keep each one as its own entry, with its original wording intact.
@@ -96,8 +105,8 @@ Output ONLY a JSON object, no markdown fences, no commentary:
 /**
  * @param current raw entry lines
  */
-export function buildConsolidationPrompt(current: string[], limit: number): string {
-  return `Character limit: ${limit}\n\nCurrent entries:\n${current.join('\n')}`;
+export function buildConsolidationPrompt(current: string[]): string {
+  return `Current entries:\n${current.join('\n')}`;
 }
 
 /**

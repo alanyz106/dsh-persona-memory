@@ -306,7 +306,7 @@ check('admin exposes the project route family', ['projectRead', 'projectWrite', 
     store: createMemoryStore({ dir: pMem, limits: BIG_LIMITS }),
     standing: createStandingStore({ dir: pMem, maxEntries: 20, maxChars: 2000 }),
     vector: {},
-    cfg: { dir: pMem, autoBackupMin: 0 },
+    cfg: { dir: pMem, autoBackupMin: 0, memoryCharLimit: 30 },
     ctx: { logger: { warn() {}, info() {} } },
     getRoute: () => undefined,
     profilePatch: path.join(testDir, 'prune.yml'),
@@ -326,6 +326,9 @@ check('admin exposes the project route family', ['projectRead', 'projectWrite', 
   check('entries carry creation dates (last stays on disk but the page ignores it)',
     entries.length === 3 && entries[0].created === '2020-01-01' && entries[0].lastReferenced === '2020-01-02',
     JSON.stringify(entries.map((e) => [e.created, e.lastReferenced])));
+  check('status marks exactly the injection window (newest entries that fit)',
+    entries.map((e) => e.inInjectionWindow).join(',') === 'false,true,true',
+    JSON.stringify(entries.map((e) => [e.text, e.inInjectionWindow])));
 
   const badDays = makeRes();
   await pruneRoute.handler(postReq({ which: 'memory', days: 0 }), badDays);
@@ -333,6 +336,13 @@ check('admin exposes the project route family', ['projectRead', 'projectWrite', 
   const badWhich = makeRes();
   await pruneRoute.handler(postReq({ which: 'standing', days: 30 }), badWhich);
   check('prune refuses an unknown store', badWhich.statusCode === 400, badWhich.body);
+
+  const consolidateRoute = pRoutes.find((r) => r.path === '/api/persona-memory/consolidate');
+  check('admin exposes the manual consolidate route', !!consolidateRoute);
+  const noRouteRes = makeRes();
+  await consolidateRoute.handler(postReq({ which: 'memory' }), noRouteRes);
+  check('manual consolidate explains a missing LLM route',
+    noRouteRes.statusCode === 400 && /模型路由/.test(noRouteRes.body), noRouteRes.body);
 
   const pruneRes = makeRes();
   await pruneRoute.handler(postReq({ which: 'memory', days: 30 }), pruneRes);

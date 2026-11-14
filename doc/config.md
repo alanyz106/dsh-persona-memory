@@ -7,13 +7,12 @@
 | 键 | 默认 | 含义 |
 |---|---|---|
 | `dir` | 见下 | 记忆文件目录；显式设置优先 |
-| `memoryCharLimit` | `5000` | MEMORY.md 注入上下文的最大字符数 |
-| `userCharLimit` | `5000` | USER.md 注入上下文的最大字符数 |
+| `memoryCharLimit` | `5000` | MEMORY.md **注入窗口**：只把最近约 N 字符的完整条目放进提示词；文件本身无上限 |
+| `userCharLimit` | `5000` | USER.md 注入窗口（同上，仅限制注入量） |
 | `enableSecretScanning` | `true` | 每次写入是否过内容扫描 |
 | `inject` | `true` | 是否注册系统提示词注入段落 |
 | `injectHumanOnly` | `true` | 仅人类主会话注入；子代理/派生会话不注入（继承父会话上下文） |
 | `sectionOrder` | `55` | 注入段落在系统提示词中的顺序 |
-| `usageNudgeThreshold` | `0.9` | 达到该用量比例时提醒合并 |
 
 `dir` 解析顺序：① 显式 `config.dir` → ② `~/.pi/agent/pi-hermes-memory`（若已存在 `MEMORY.md`，即与 Pi 共用）→ ③ `$DSH_HOME/memory`（默认 `~/.dsh/memory`）。
 
@@ -44,8 +43,7 @@
 | `learnTimeoutMs` | `120000` | 学习 LLM 调用超时 |
 | `learnProjectContext` | `true` | 把项目记忆摘要一并给学习模型做「已存在则跳过」判断 |
 | `learnProjectContextCharLimit` | `1500` | 上述摘要的字符预算 |
-| `autoConsolidate` | `true` | 超限时自动 LLM 合并（严格更小才提交） |
-| `consolidateTimeoutMs` | `120000` | 合并 LLM 调用超时 |
+| `consolidateTimeoutMs` | `120000` | 管理页「整理记忆」按钮的 LLM 调用超时（不自动触发） |
 
 ## 常驻指令
 

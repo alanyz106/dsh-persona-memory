@@ -50,6 +50,7 @@ const PI_HERMES_DIR = path.join(os.homedir(), '.pi', 'agent', 'pi-hermes-memory'
 
 export interface PluginConfig {
   dir?: string;
+  /** 注入窗口：只把最近约 N 字符的完整条目放进提示词（文件本身无硬上限）。 */
   memoryCharLimit: number;
   userCharLimit: number;
   enableSecretScanning: boolean;
@@ -58,7 +59,6 @@ export interface PluginConfig {
   injectHumanOnly: boolean;
   sectionOrder: number;
   searchMaxResults: number;
-  usageNudgeThreshold: number;
   learnEnabled: boolean;
   /** Only run background learning in human-driven sessions. */
   learnHumanOnly: boolean;
@@ -70,7 +70,7 @@ export interface PluginConfig {
   learnProjectContext: boolean;
   /** 该摘要的字符预算（常驻区 + @memory 索引行）。 */
   learnProjectContextCharLimit: number;
-  autoConsolidate: boolean;
+  /** 管理页手动「整理记忆」的 LLM 超时（不再自动触发）。 */
   consolidateTimeoutMs: number;
   standingEnabled: boolean;
   standingCharLimit: number;
@@ -262,8 +262,6 @@ export function apply(ctx: Context, config?: Record<string, unknown>): void {
     injectHumanOnly: true,
     sectionOrder: 55,
     searchMaxResults: 10,
-    // usage reporting + consolidation nudge
-    usageNudgeThreshold: 0.9,
     // background learning is opt-in: the shipped default keeps the agent from
     // writing inferred facts unless the operator turns it back on
     learnEnabled: false,
@@ -276,9 +274,7 @@ export function apply(ctx: Context, config?: Record<string, unknown>): void {
     // 模型，让它能判断「这条已在项目记忆里」而跳过。只传摘要不传正文。
     learnProjectContext: true,
     learnProjectContextCharLimit: 1500,
-    // auto-consolidation when a store exceeds its char limit (LLM merge,
-    // committed only when strictly smaller and scanner-clean)
-    autoConsolidate: true,
+    // 手动整理（管理页按钮）的 LLM 超时；合并结果必须严格更小才提交
     consolidateTimeoutMs: 120000,
     // standing instructions (STANDING.md, always injected, user-authored only)
     standingEnabled: true,
@@ -345,13 +341,7 @@ export function apply(ctx: Context, config?: Record<string, unknown>): void {
   });
 
   const memoryDir = cfg.dir;
-  const store = createMemoryStore({
-    dir: memoryDir,
-    limits: {
-      memory: cfg.memoryCharLimit,
-      user: cfg.userCharLimit,
-    },
-  });
+  const store = createMemoryStore({ dir: memoryDir });
   const standing: StandingStore = createStandingStore({
     dir: cfg.dir,
     maxEntries: cfg.standingMaxEntries,
@@ -377,7 +367,7 @@ export function apply(ctx: Context, config?: Record<string, unknown>): void {
   };
   const cwdOfSession = (session: unknown): string | null => cwdFromSession(ctx, session);
 
-  registerMemoryTool(ctx, store, cfg as MemoryToolConfig);
+  registerMemoryTool(ctx, store, { enableSecretScanning: cfg.enableSecretScanning } as MemoryToolConfig);
   registerMemorySearchTool(ctx, store, cfg, fts, vector);
   // 后台学习只写全局记忆，但要靠当前项目的记忆摘要判断「这条已经在项目记忆里」，
   // 所以这里必须能拿到会话 cwd。

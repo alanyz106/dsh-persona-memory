@@ -27,7 +27,8 @@ import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { parseEntries, decodeEntry, ENTRY_DELIMITER, isEnoent, type DecodedEntry, type MemoryKind, type MemoryStore } from './memory-store.js';
+import { parseEntries, decodeEntry, ENTRY_DELIMITER, isEnoent, windowStartIndex, type DecodedEntry, type MemoryKind, type MemoryStore } from './memory-store.js';
+import { consolidateStore, type ConsolidationConfig } from './consolidate.js';
 import { parseInstructions, normalizeInstruction, type StandingStore } from './standing.js';
 import {
   resolveProjectRoot,
@@ -402,14 +403,13 @@ export interface SchemaField {
 /** Config schema surfaced to the admin page (mirrors index.ts cfg defaults). */
 export const CFG_SCHEMA: SchemaField[] = [
   { key: 'dir', type: 'string', label: '记忆目录', group: '基础', help: '显式设置优先；默认：Pi 有 MEMORY.md 才共享，否则用 $DSH_HOME/memory' },
-  { key: 'memoryCharLimit', type: 'number', label: 'MEMORY 字符上限', group: '基础' },
-  { key: 'userCharLimit', type: 'number', label: 'USER 字符上限', group: '基础' },
+  { key: 'memoryCharLimit', type: 'number', label: 'MEMORY 注入窗口', group: '基础', help: '只把最近约 N 字符的完整条目注入提示词；文件本身不设上限，更早的条目仍保留、可搜索、页面可折叠查看' },
+  { key: 'userCharLimit', type: 'number', label: 'USER 注入窗口', group: '基础', help: '同上：仅限制注入量，不限制文件大小' },
   { key: 'enableSecretScanning', type: 'bool', label: '写入内容扫描', group: '基础', help: '拦截提示注入/凭据' },
   { key: 'inject', type: 'bool', label: '注入记忆段落', group: '基础', help: '每请求注入 system prompt' },
   { key: 'injectHumanOnly', type: 'bool', label: '仅人类会话注入', group: '基础', help: '子代理/派生会话不注入记忆（继承父会话上下文）' },
   { key: 'sectionOrder', type: 'number', label: '记忆段顺序', group: '基础' },
   { key: 'searchMaxResults', type: 'number', label: '搜索最大条数', group: '检索' },
-  { key: 'usageNudgeThreshold', type: 'number', label: '用量提醒阈值', group: '基础', help: '0~1，达此比例提醒合并' },
   { key: 'learnEnabled', type: 'bool', label: '后台学习', group: '学习', help: '每 N 轮复习对话提取事实' },
   { key: 'learnHumanOnly', type: 'bool', label: '仅人类会话学习', group: '学习', help: '子代理/派生会话不提取事实写入记忆' },
   { key: 'learnIntervalTurns', type: 'number', label: '学习间隔（轮）', group: '学习' },
@@ -418,8 +418,7 @@ export const CFG_SCHEMA: SchemaField[] = [
   { key: 'learnTimeoutMs', type: 'number', label: '学习超时（ms）', group: '学习' },
   { key: 'learnProjectContext', type: 'bool', label: '学习时附带项目摘要', group: '学习', help: '把当前项目记忆摘要（常驻区+@memory 索引）传给学习模型，用于跳过已在项目记忆里的事实；项目知识本身不写全局' },
   { key: 'learnProjectContextCharLimit', type: 'number', label: '项目摘要字符预算', group: '学习', help: '超出截断并标记 (truncated)' },
-  { key: 'autoConsolidate', type: 'bool', label: '自动合并', group: '合并', help: '超限用 LLM 合并精简' },
-  { key: 'consolidateTimeoutMs', type: 'number', label: '合并超时（ms）', group: '合并' },
+  { key: 'consolidateTimeoutMs', type: 'number', label: '整理超时（ms）', group: '合并', help: '管理页「整理记忆」按钮的 LLM 调用超时；不再自动触发' },
   { key: 'standingEnabled', type: 'bool', label: '常驻指令注入', group: '常驻' },
   { key: 'standingCharLimit', type: 'number', label: '常驻字符预算', group: '常驻' },
   { key: 'standingMaxEntries', type: 'number', label: '常驻最大条数', group: '常驻' },
@@ -451,11 +450,11 @@ export const CFG_SCHEMA: SchemaField[] = [
 /** Config defaults (mirrors index.ts). */
 export const CFG_DEFAULTS: Record<string, unknown> = {
   memoryCharLimit: 5000, userCharLimit: 5000, enableSecretScanning: true, inject: true, injectHumanOnly: true,
-  sectionOrder: 55, searchMaxResults: 10, usageNudgeThreshold: 0.9, learnEnabled: false,
+  sectionOrder: 55, searchMaxResults: 10, learnEnabled: false,
   learnHumanOnly: true, learnIntervalTurns: 10,
   learnRecentTurns: 2, learnMaxChars: 6000,
   learnTimeoutMs: 120000, learnProjectContext: true, learnProjectContextCharLimit: 1500,
-  autoConsolidate: true, consolidateTimeoutMs: 120000,
+  consolidateTimeoutMs: 120000,
   standingEnabled: true, standingCharLimit: 2000, standingMaxEntries: 20,
   projectEnabled: true, projectFileCharLimit: 20000, projectResidentCharLimit: 6000,
   projectIndexCharLimit: 4000, projectAutoMigrate: true, projectMigrateTimeoutMs: 1200000, projectBootstrapHint: true,
@@ -886,7 +885,6 @@ export function makeAdminRoutes(deps: AdminRouteDeps): WebRoute[] {
     exists: boolean;
     entries: number;
     chars: number;
-    usagePct: number;
   }
 
   /** Store summaries for the status page. */
@@ -895,28 +893,34 @@ export function makeAdminRoutes(deps: AdminRouteDeps): WebRoute[] {
     for (const which of ['memory', 'user'] as const) {
       const file = store.fileFor(which);
       const raw = readRaw(file);
-      const limit = which === 'user' ? cfgNum(cfg, 'userCharLimit', 5000) : cfgNum(cfg, 'memoryCharLimit', 5000);
       out[which] = raw === null
-        ? { exists: false, entries: 0, chars: 0, usagePct: 0 }
+        ? { exists: false, entries: 0, chars: 0 }
         : {
             exists: true,
             entries: parseEntries(raw).length,
             chars: raw.length,
-            usagePct: Math.min(100, Math.round((raw.length / limit) * 100)),
           };
     }
     return out;
   }
 
   /** Entry lists for the status page (raw text, decoded). */
-  function listEntries(): Record<string, Array<{ text: string; created: string; lastReferenced: string; project: string | null }>> {
-    const out: Record<string, Array<{ text: string; created: string; lastReferenced: string; project: string | null }>> = { memory: [], user: [] };
+  function listEntries(): Record<string, Array<{ text: string; created: string; lastReferenced: string; project: string | null; inInjectionWindow: boolean }>> {
+    const out: Record<string, Array<{ text: string; created: string; lastReferenced: string; project: string | null; inInjectionWindow: boolean }>> = { memory: [], user: [] };
     for (const which of Object.keys(out) as MemoryKind[]) {
       const raw = readRaw(store.fileFor(which));
       if (raw === null) continue;
-      for (const entry of parseEntries(raw)) {
-        const decoded = decodeEntry(entry);
-        out[which].push({ text: decoded.text, created: decoded.created, lastReferenced: decoded.lastReferenced, project: decoded.project });
+      const decoded = parseEntries(raw).map(decodeEntry);
+      const budget = which === 'user' ? cfgNum(cfg, 'userCharLimit', 5000) : cfgNum(cfg, 'memoryCharLimit', 5000);
+      const start = windowStartIndex(decoded, budget);
+      for (let i = 0; i < decoded.length; i++) {
+        out[which].push({
+          text: decoded[i].text,
+          created: decoded[i].created,
+          lastReferenced: decoded[i].lastReferenced,
+          project: decoded[i].project,
+          inInjectionWindow: i >= start,
+        });
       }
     }
     return out;
@@ -1103,9 +1107,6 @@ export function makeAdminRoutes(deps: AdminRouteDeps): WebRoute[] {
     const outcome = change(current);
     if (outcome.error) return { ok: false, error: outcome.error };
     const next = outcome.next!.map((e) => encodeEntry(e.text, e.created, e.lastReferenced, e.project));
-    const limit = which === 'user' ? cfgNum(cfg, 'userCharLimit', 5000) : cfgNum(cfg, 'memoryCharLimit', 5000);
-    const charCount = next.length ? next.join(ENTRY_DELIMITER).length : 0;
-    if (charCount > limit) return { ok: false, error: `容量超限（${charCount} > ${limit}），请先合并或精简` };
     writeRawAtomic(file, next.length ? next.join(ENTRY_DELIMITER) : '');
     return { ok: true, message: outcome.message ?? `${which} 已更新（${next.length} 条）`, entryCount: next.length };
   }
@@ -1223,6 +1224,34 @@ export function makeAdminRoutes(deps: AdminRouteDeps): WebRoute[] {
         return { next: list.filter((_, i) => i !== index), message: `${which} 条目已删除` };
       });
       writeJson(res, result.ok ? 200 : 400, result);
+    } },
+    /**
+     * Manual consolidation (`mem-store` has no hard cap, so this never fires
+     * automatically): the user clicks「整理记忆」, the session's own model route
+     * merges related entries, and the result is committed only when it is
+     * strictly smaller, parseable and scanner-clean.
+     */
+    { kind: 'exact', path: '/api/persona-memory/consolidate', handler: async (req: IncomingMessage, res: ServerResponse) => {
+      if (!guard(req, res, 'POST')) return;
+      const body = await readJsonBody(req);
+      if (body === undefined) { writeJson(res, 400, { error: 'invalid JSON body' }); return; }
+      const which = String(body.which || '');
+      if (!['memory', 'user'].includes(which)) { writeJson(res, 400, { error: 'invalid which' }); return; }
+      const route = deps.getRoute?.();
+      if (!route) {
+        writeJson(res, 400, { ok: false, error: '没有可用的模型路由：先在 dsh web 里发一次会话请求，或配置默认模型后重试' });
+        return;
+      }
+      const consolidationCfg: ConsolidationConfig = {
+        enableSecretScanning: cfgBool(cfg, 'enableSecretScanning', true),
+        consolidateTimeoutMs: cfgNum(cfg, 'consolidateTimeoutMs', 120000),
+      };
+      const result = await consolidateStore(deps.ctx, store, route, consolidationCfg, which as MemoryKind);
+      const message = result.ran
+        ? `已整理 ${which}：${result.beforeEntries} → ${result.afterEntries} 条，${result.beforeChars} → ${result.afterChars} 字符`
+        : `未整理（${result.reason ?? 'unknown'}）`;
+      log(`admin: consolidate ${which}: ${message}`);
+      writeJson(res, 200, { ok: true, ...result, message });
     } },
     /**
      * Bulk-delete entries older than N days (`created` tag older than the

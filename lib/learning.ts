@@ -15,7 +15,6 @@
  */
 import { scanContent } from './secret-scanner.js';
 import { callLlm, latestRoute, sessionEvents, type LlmRoute } from './llm-helper.js';
-import { maybeConsolidate, type ConsolidationConfig } from './consolidate.js';
 import { renderAgents, readIndex, resolveProjectRoot, type ProjectIndex } from './project-memory.js';
 import { isDerivedSession } from './sessions.js';
 import type { MemoryStore } from './memory-store.js';
@@ -47,7 +46,7 @@ Rules:
 /** sessions with a learning call in flight */
 const inflight = new Set<string>();
 
-export interface LearningConfig extends ConsolidationConfig {
+export interface LearningConfig {
   enableSecretScanning: boolean;
   learnEnabled: boolean;
   /** Only run background learning in human-driven sessions. */
@@ -60,8 +59,6 @@ export interface LearningConfig extends ConsolidationConfig {
   learnProjectContext: boolean;
   /** Character budget for that summary (resident rules + index lines). */
   learnProjectContextCharLimit: number;
-  memoryCharLimit: number;
-  autoConsolidate: boolean;
 }
 
 /** Injected by the host: the working directory of the session being learned. */
@@ -123,7 +120,7 @@ async function runLearning(
     if (!route) return;
     const transcript = buildTranscript(session, cfg.learnRecentTurns, cfg.learnMaxChars);
     if (!transcript) return;
-    const current = store.readSync('memory', cfg.learnMaxChars).content;
+    const current = store.windowSync('memory', cfg.learnMaxChars).content;
     // What the project already stores, so the learner can skip it instead of
     // writing the same rules into the global store. Missing project / missing
     // AGENTS.md / a read failure all collapse to '' (the section is omitted).
@@ -139,19 +136,9 @@ async function runLearning(
     const facts = parseFacts(reply);
     for (const fact of facts) {
       if (cfg.enableSecretScanning && scanContent(fact)) continue;
-      const added = await store.add('memory', fact);
-      if (added.overflow) {
-        // Store is at capacity and refused the write (hermes semantics).
-        // Consolidate once and retry; if still refused, drop this fact
-        // rather than silently growing past the limit.
-        const limit = cfg.memoryCharLimit;
-        if (cfg.autoConsolidate && limit > 0) {
-          await maybeConsolidate(ctx, store, route, cfg, 'memory');
-          const retried = await store.add('memory', fact);
-          if (!retried.overflow && !retried.conflict) continue;
-        }
-        ctx.logger.warn('[dsh-persona-memory] learning skipped fact at capacity: %s', fact.slice(0, 80));
-      }
+      // The store has no hard cap; old entries simply fall out of the
+      // injection window and remain searchable.
+      await store.add('memory', fact);
     }
     if (facts.length > 0) {
       ctx.logger.info('[dsh-persona-memory] learned %d fact(s) from %s', facts.length, session.id);
@@ -166,15 +153,6 @@ async function runLearning(
       projectContext.length,
       facts.length,
     );
-    // If the learned facts pushed memory over budget, consolidate.
-    const stat = await store.stat('memory');
-    const limit = cfg.memoryCharLimit;
-    if (stat.exists && stat.entryCount > 0 && limit > 0) {
-      const raw = await store.listRaw('memory');
-      if (raw.join('\n§\n').length > limit) {
-        await maybeConsolidate(ctx, store, route, cfg, 'memory');
-      }
-    }
   } finally {
     inflight.delete(session.id);
   }
